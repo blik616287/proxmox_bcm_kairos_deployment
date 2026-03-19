@@ -158,8 +158,9 @@ if [ -n "$ACTUAL_KERNEL" ]; then
 fi
 cmsh -c "category; list" 2>/dev/null | grep -q kairos || cmsh -c "category; clone default kairos; commit" 2>/dev/null
 cmsh -c "category; use kairos; set softwareimage kairos-installer; commit" 2>&1 || true
-cmsh -c "category; use kairos; set installmode NOSYNC; commit" 2>&1 || true
-cmsh -c "category; use kairos; set newnodeinstallmode NOSYNC; commit" 2>&1 || true
+cmsh -c "category; use kairos; set installmode SKIP; commit" 2>&1 || true
+cmsh -c "category; use kairos; set newnodeinstallmode SKIP; commit" 2>&1 || true
+cmsh -c "category; use kairos; set installbootrecord no; commit" 2>&1 || true
 cmsh -c "category; use kairos; set kernelparameters console=ttyS0,115200n8; commit" 2>&1 || true
 cmsh -c "category; use kairos; set initializescript; commit" 2>&1 || true
 cmsh -c "category; use kairos; set finalizescript; commit" 2>&1 || true
@@ -168,9 +169,14 @@ cmsh -c "category; use kairos; monitoring; setup; healthconf; use mounts; set di
 cmsh -c "category; use kairos; monitoring; setup; healthconf; use ntp; set disabled yes; commit" 2>&1 || true
 cmsh -c "partition; use base; set defaultcategory kairos; commit" 2>&1 || true
 cmsh -c "partition; use base; set nodebasename node; set nodedigits 3; commit" 2>&1 || true
-EOF
 
-${SSH_CMD} "cmsh -c 'device; use node001; set mac ${COMPUTE_MAC}; set category kairos; commit'" 2>/dev/null | filter_motd || true
+# Verify critical settings
+VERIFY_MODE=$(cmsh -c "category; use kairos; get installmode" 2>/dev/null)
+VERIFY_IMG=$(cmsh -c "category; use kairos; get softwareimage" 2>/dev/null)
+echo "Category verify: installmode=${VERIFY_MODE} softwareimage=${VERIFY_IMG}"
+echo "$VERIFY_MODE" | grep -qi "SKIP" || { echo "[FAIL] Category installmode is not SKIP"; exit 1; }
+echo "$VERIFY_IMG" | grep -q "kairos-installer" || { echo "[FAIL] Category softwareimage is not kairos-installer"; exit 1; }
+EOF
 
 # 7. Verify and regenerate ramdisk
 info "[7/7] Verifying setup + generating ramdisk..."
