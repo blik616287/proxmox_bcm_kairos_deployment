@@ -105,15 +105,15 @@ cmsh -c "softwareimage; list" 2>/dev/null | grep -q kairos-installer || \
 echo "[OK] kairos-installer image ready"
 EOF
 
-# 4. Install dd script + service
+# 4. Install dd script + service via /cm/shared (NFS-mounted on all nodes)
 info "[4/7] Installing dd service..."
-${SSH_CMD} "mkdir -p /cm/images/kairos-installer/usr/local/sbin /cm/images/kairos-installer/etc/systemd/system"
-${SCP_CMD} "${BUILD_DIR}/install-kairos.sh" root@${BCM_HOST}:/cm/images/kairos-installer/usr/local/sbin/install-kairos.sh
-${SSH_CMD} "chmod +x /cm/images/kairos-installer/usr/local/sbin/install-kairos.sh"
+${SSH_CMD} "mkdir -p /cm/shared/kairos"
+${SCP_CMD} "${BUILD_DIR}/install-kairos.sh" root@${BCM_HOST}:/cm/shared/kairos/install-kairos.sh
+${SSH_CMD} "chmod +x /cm/shared/kairos/install-kairos.sh"
 
+# Create the service file and finalize script in /cm/shared (NFS-mounted on all nodes)
 ${SSH_CMD} << 'EOF' | filter_motd
-IMAGE_ROOT="/cm/images/kairos-installer"
-cat > "${IMAGE_ROOT}/etc/systemd/system/kairos-install.service" << 'SERVICE'
+cat > /cm/shared/kairos/kairos-install.service << 'SERVICE'
 [Unit]
 Description=Install Kairos Raw Disk Image
 After=network-online.target
@@ -121,18 +121,28 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStartPre=/bin/bash -c 'sleep 10'
-ExecStart=/usr/local/sbin/install-kairos.sh
+ExecStart=/cm/shared/kairos/install-kairos.sh
 TimeoutStartSec=1800
 StandardOutput=journal+console
 StandardError=journal+console
 [Install]
 WantedBy=multi-user.target
 SERVICE
-chroot "${IMAGE_ROOT}" systemctl enable kairos-install.service 2>&1 || {
-    mkdir -p "${IMAGE_ROOT}/etc/systemd/system/multi-user.target.wants"
-    ln -sf /etc/systemd/system/kairos-install.service "${IMAGE_ROOT}/etc/systemd/system/multi-user.target.wants/kairos-install.service"
-}
+
+# Finalize script: runs on the node after BCM provisioning completes
+cat > /cm/shared/kairos/finalize.sh << 'FINALIZE'
+#!/bin/bash
+cp /cm/shared/kairos/kairos-install.service /etc/systemd/system/kairos-install.service
+systemctl daemon-reload
+systemctl enable --now kairos-install.service
+FINALIZE
+chmod +x /cm/shared/kairos/finalize.sh
+
+echo "[OK] Install script + service + finalize in /cm/shared/kairos/"
 EOF
+
+# Set the finalize script on the kairos category
+${SSH_CMD} "cmsh -c 'category; use kairos; set finalizescript /cm/shared/kairos/finalize.sh; commit'" 2>/dev/null | filter_motd || true
 
 # 5. PXE template + syslinux modules
 info "[5/7] PXE template..."

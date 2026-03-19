@@ -14,6 +14,13 @@
   changed_when: false
   failed_when: false
 
+- name: Create serial log directory
+  tags: [create]
+  when: kairos_vm_check.rc != 0
+  ansible.builtin.file:
+    path: /var/log/e2e
+    state: directory
+
 - name: Create Kairos compute node VM
   tags: [create]
   when: kairos_vm_check.rc != 0
@@ -26,7 +33,8 @@
       --net0 virtio={{ kairos_vm_mac }},bridge={{ bcm_internal_bridge }} \
       --virtio0 local-lvm:{{ kairos_vm_disk_size | regex_replace('G$', '') }},format=raw \
       --boot order='virtio0;net0' \
-      --ostype l26
+      --ostype l26 \
+      --args '-chardev file,id=serial0,path=/var/log/e2e/kairos-serial.log -serial chardev:serial0'
 
 - name: Start Kairos VM
   tags: [create]
