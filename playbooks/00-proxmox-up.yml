@@ -28,7 +28,7 @@
   tasks:
     - name: Check skip condition
       ansible.builtin.set_fact:
-        proxmox_already_running: "{{ hostvars['localhost']['proxmox_already_running'] | default(false) }}"
+        proxmox_already_running: "{{ hostvars['localhost']['proxmox_already_running'] | default(false) | bool }}"
 
     - name: Run proxmox prereqs
       ansible.builtin.include_role:
@@ -51,7 +51,7 @@
   tasks:
     - name: Check skip condition
       ansible.builtin.set_fact:
-        proxmox_already_running: "{{ hostvars['localhost']['proxmox_already_running'] | default(false) }}"
+        proxmox_already_running: "{{ hostvars['localhost']['proxmox_already_running'] | default(false) | bool }}"
 
     - name: Run proxmox configuration
       ansible.builtin.include_role:
