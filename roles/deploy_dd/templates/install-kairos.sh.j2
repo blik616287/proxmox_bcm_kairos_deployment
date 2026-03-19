@@ -32,8 +32,16 @@ echo "[\$(date)] Writing to ${DISK}..."
 /dev/shm/kinstall/sync
 echo "[\$(date)] Done. Rebooting..."
 /dev/shm/kinstall/sleep 2
+# Enable sysrq and trigger reboot
+echo 1 > /proc/sys/kernel/sysrq 2>/dev/null || true
 echo s > /proc/sysrq-trigger 2>/dev/null || true
 /dev/shm/kinstall/sleep 1
+echo b > /proc/sysrq-trigger 2>/dev/null || true
+# Fallback: force reboot via staged binary
+/dev/shm/kinstall/sleep 3
+/dev/shm/kinstall/reboot -f 2>/dev/null || true
+# Last resort: direct kernel reboot
+echo 1 > /proc/sys/kernel/sysrq 2>/dev/null || true
 echo b > /proc/sysrq-trigger
 DDEOF
 chmod +x "$RAMDIR/run-dd.sh"
