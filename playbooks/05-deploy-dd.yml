@@ -1,0 +1,7 @@
+---
+# Deploy Kairos raw image to BCM head node.
+- name: Deploy Kairos via dd installer
+  hosts: localhost
+  gather_facts: true
+  roles:
+    - deploy_dd

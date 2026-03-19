@@ -1,0 +1,55 @@
+---
+# Tear down all e2e resources: VMs, network, Proxmox testbed, local artifacts.
+#
+# Usage:
+#   ansible-playbook playbooks/teardown.yml
+
+- name: Destroy e2e VMs in Proxmox
+  hosts: proxmox
+  gather_facts: false
+  tasks:
+    - name: Stop and destroy Kairos VM
+      ansible.builtin.shell: |
+        qm stop {{ kairos_vmid }} 2>/dev/null || true
+        qm destroy {{ kairos_vmid }} --purge 2>/dev/null || true
+      changed_when: true
+      failed_when: false
+
+    - name: Stop and destroy BCM VM
+      ansible.builtin.shell: |
+        qm stop {{ bcm_vmid }} 2>/dev/null || true
+        qm destroy {{ bcm_vmid }} --purge 2>/dev/null || true
+      changed_when: true
+      failed_when: false
+
+    - name: Remove uploaded ISOs
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /var/lib/vz/template/iso/bcm-autoinstall.iso
+        - /var/lib/vz/images/bcm-init.img
+
+    - name: Remove vmbr1 from /etc/network/interfaces
+      ansible.builtin.blockinfile:
+        path: /etc/network/interfaces
+        marker: "# {mark} BCM INTERNAL NETWORK"
+        state: absent
+      failed_when: false
+
+    - name: Bring down vmbr1
+      ansible.builtin.shell: ifdown {{ bcm_internal_bridge }} 2>/dev/null || ip link delete {{ bcm_internal_bridge }} 2>/dev/null || true
+      changed_when: true
+      failed_when: false
+
+- name: Clean local artifacts
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Remove build and log directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ build_dir }}"
+        - "{{ e2e_dir }}/logs"

@@ -1,0 +1,42 @@
+---
+# Creates the BCM internal bridge (vmbr1) inside Proxmox.
+# If bcm_provisioning_nic is set, bridges to that physical NIC so bare metal
+# servers on the same switch can PXE boot from BCM.
+# If empty, bridge-ports=none (virtual only, VM-to-VM).
+
+- name: Check if {{ bcm_internal_bridge }} already exists
+  ansible.builtin.shell: ip link show {{ bcm_internal_bridge }}
+  register: bridge_check
+  changed_when: false
+  failed_when: false
+
+- name: Add {{ bcm_internal_bridge }} to /etc/network/interfaces
+  ansible.builtin.blockinfile:
+    path: /etc/network/interfaces
+    block: |
+      auto {{ bcm_internal_bridge }}
+      iface {{ bcm_internal_bridge }} inet manual
+          bridge-ports {{ bcm_provisioning_nic | default('none', true) }}
+          bridge-stp off
+          bridge-fd 0
+          # BCM provisioning network ({{ bcm_internal_cidr }})
+    marker: "# {mark} BCM INTERNAL NETWORK"
+  when: bridge_check.rc != 0
+
+- name: Bring up {{ bcm_internal_bridge }}
+  ansible.builtin.command: ifup {{ bcm_internal_bridge }}
+  when: bridge_check.rc != 0
+
+- name: Verify {{ bcm_internal_bridge }} is up
+  ansible.builtin.shell: ip link show {{ bcm_internal_bridge }} | grep -q 'state UP\|state UNKNOWN'
+  changed_when: false
+
+- name: Show bridge configuration
+  ansible.builtin.debug:
+    msg: >-
+      {{ bcm_internal_bridge }} is up.
+      {% if bcm_provisioning_nic | default('') | length > 0 %}
+      Bridged to physical NIC {{ bcm_provisioning_nic }} — bare metal PXE boot enabled.
+      {% else %}
+      Virtual only (no physical uplink) — VM-to-VM provisioning only.
+      {% endif %}

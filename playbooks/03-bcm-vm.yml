@@ -1,0 +1,19 @@
+---
+# Create, install, and boot BCM head node VM in Proxmox.
+#
+# Prerequisites:
+#   - Proxmox is running and API is reachable
+#   - vmbr1 internal bridge exists (playbook 01)
+#   - BCM remastered ISO exists at build/bcm-autoinstall.iso
+#   - BCM config drive exists at build/.bcm-init.img
+#
+# Usage:
+#   ansible-playbook playbooks/02-bcm-vm.yml                # Full create + install
+#   ansible-playbook playbooks/02-bcm-vm.yml --tags start   # Start existing VM
+#   ansible-playbook playbooks/02-bcm-vm.yml --tags stop    # Stop VM
+
+- name: Manage BCM head node VM
+  hosts: proxmox
+  gather_facts: false
+  roles:
+    - bcm_vm

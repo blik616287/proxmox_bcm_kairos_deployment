@@ -1,0 +1,14 @@
+---
+# Full end-to-end pipeline: Proxmox → BCM → Kairos → validate
+#
+# Usage:
+#   ansible-playbook playbooks/site.yml
+
+- import_playbook: 00-proxmox-up.yml
+- import_playbook: 01-create-internal-network.yml
+- import_playbook: 02-bcm-prepare.yml
+- import_playbook: 03-bcm-vm.yml
+- import_playbook: 04-kairos-build.yml
+- import_playbook: 05-deploy-dd.yml
+- import_playbook: 06-kairos-vm.yml
+- import_playbook: 07-validate.yml

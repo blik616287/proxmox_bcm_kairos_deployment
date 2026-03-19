@@ -1,0 +1,7 @@
+---
+# Run 18-point validation on Kairos compute node.
+- name: Validate Kairos deployment
+  hosts: localhost
+  gather_facts: true
+  roles:
+    - validate

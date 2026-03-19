@@ -1,0 +1,197 @@
+#!/bin/bash
+# deploy-dd.sh — Rendered by Ansible with all variables injected.
+# Uploads raw image to BCM, configures installer + kairos category.
+set -uo pipefail
+
+BCM_HOST="{{ bcm_vm_ip }}"
+BCM_PASSWORD="{{ bcm_password }}"
+HEAD_NODE_IP="{{ bcm_internal_ip }}"
+COMPUTE_MAC="{{ kairos_vm_mac }}"
+BUILD_DIR="{{ build_dir }}"
+RAW_IMAGE="${BUILD_DIR}/kairos-disk.raw"
+
+SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+SSH_CMD="sshpass -p ${BCM_PASSWORD} ssh ${SSH_OPTS} root@${BCM_HOST}"
+SCP_CMD="sshpass -p ${BCM_PASSWORD} scp -O ${SSH_OPTS}"
+
+filter_motd() { grep -vE "cmfirstboot is still in progress|^$" || true; }
+
+info()  { echo -e "\033[0;32m[INFO]\033[0m $*"; }
+err()   { echo -e "\033[0;31m[ERROR]\033[0m $*" >&2; }
+step()  { echo -e "\033[0;36m\033[1m[STEP]\033[0m $*"; }
+
+[ -f "${RAW_IMAGE}" ] || { err "Raw image not found at ${RAW_IMAGE}"; exit 1; }
+
+step "Checking BCM at ${BCM_HOST}..."
+${SSH_CMD} "echo ok" &>/dev/null || { err "Cannot SSH to BCM at ${BCM_HOST}"; exit 1; }
+info "BCM reachable"
+
+# Wait for cmfirstboot
+info "Waiting for cmfirstboot..."
+while true; do
+    STATUS=$(${SSH_CMD} "systemctl is-active cmfirstboot" 2>/dev/null | filter_motd || echo "unknown")
+    [[ "$STATUS" != "activating" && "$STATUS" != "active" ]] && break
+    sleep 10
+done
+
+# Wait for clean shell
+while true; do
+    [[ "$(${SSH_CMD} 'echo CLEAN' 2>/dev/null)" == "CLEAN" ]] && break
+    sleep 5
+done
+
+# Wait for cmd + cmsh
+info "Waiting for BCM services..."
+ELAPSED=0
+while true; do
+    CMD=$(${SSH_CMD} "systemctl is-active cmd" 2>/dev/null | filter_motd || echo "inactive")
+    CMSH=$(${SSH_CMD} "cmsh -c 'device; list' >/dev/null 2>&1 && echo ok || echo no" 2>/dev/null | filter_motd || echo "no")
+    [[ "$CMD" == "active" && "$CMSH" == "ok" ]] && break
+    ELAPSED=$((ELAPSED + 5))
+    (( ELAPSED >= 300 )) && { err "BCM services not ready"; exit 1; }
+    sleep 5
+done
+info "BCM services ready"
+
+${SSH_CMD} "command -v sshpass >/dev/null 2>&1 || apt-get install -y -qq sshpass >/dev/null 2>&1" 2>/dev/null || true
+
+# SSH key pair
+BCM_KEY="${BUILD_DIR}/bcm-kairos-key"
+if [ ! -f "$BCM_KEY" ]; then
+    ssh-keygen -t ed25519 -f "$BCM_KEY" -N "" -C "kairos-node@bcm" -q
+fi
+PUBKEY=$(cat "${BCM_KEY}.pub")
+${SSH_CMD} "grep -qF '${PUBKEY}' /root/.ssh/authorized_keys 2>/dev/null || echo '${PUBKEY}' >> /root/.ssh/authorized_keys" 2>/dev/null || true
+
+# NFS exports
+${SSH_CMD} "exportfs -v 2>/dev/null | grep -q '/cm/images/default-image' || exportfs -o ro,no_subtree_check,no_root_squash,async 10.141.0.0/16:/cm/images/default-image" 2>/dev/null || true
+${SSH_CMD} "exportfs -v 2>/dev/null | grep -q '/cm/shared' || exportfs -o rw,no_subtree_check,no_root_squash,async 10.141.0.0/16:/cm/shared" 2>/dev/null || true
+
+step "Deploying Kairos via dd Installer"
+
+# 1. Upload raw image
+info "[1/7] Compressing and uploading..."
+${SSH_CMD} "mkdir -p /cm/shared/kairos" | filter_motd
+COMPRESSED="${RAW_IMAGE}.gz"
+[ ! -f "$COMPRESSED" ] || [ "$RAW_IMAGE" -nt "$COMPRESSED" ] && gzip -c "$RAW_IMAGE" > "$COMPRESSED"
+${SCP_CMD} "${COMPRESSED}" root@${BCM_HOST}:/cm/shared/kairos/disk.raw.gz
+
+# 2. HTTP server
+info "[2/7] HTTP server..."
+${SSH_CMD} << 'EOF' | filter_motd
+cat > /etc/systemd/system/kairos-http.service << 'SVC'
+[Unit]
+Description=Kairos image HTTP server
+After=network.target
+[Service]
+Type=simple
+WorkingDirectory=/cm/shared/kairos
+ExecStart=/usr/bin/python3 -m http.server 8888
+Restart=always
+[Install]
+WantedBy=multi-user.target
+SVC
+systemctl daemon-reload
+systemctl enable --now kairos-http
+sleep 2
+curl --fail --silent --head http://localhost:8888/disk.raw.gz >/dev/null 2>&1 && echo "[OK]" || { echo "[FAIL]"; exit 1; }
+EOF
+
+# 3. Installer image
+info "[3/7] Creating installer image..."
+${SSH_CMD} << 'EOF' | filter_motd
+cmsh -c "softwareimage; list" 2>/dev/null | grep -q kairos-installer || \
+    cmsh -c "softwareimage; clone default-image kairos-installer; commit" 2>&1
+echo "[OK] kairos-installer image ready"
+EOF
+
+# 4. Install dd script + service
+info "[4/7] Installing dd service..."
+${SSH_CMD} "mkdir -p /cm/images/kairos-installer/usr/local/sbin /cm/images/kairos-installer/etc/systemd/system"
+${SCP_CMD} "${BUILD_DIR}/install-kairos.sh" root@${BCM_HOST}:/cm/images/kairos-installer/usr/local/sbin/install-kairos.sh
+${SSH_CMD} "chmod +x /cm/images/kairos-installer/usr/local/sbin/install-kairos.sh"
+
+${SSH_CMD} << 'EOF' | filter_motd
+IMAGE_ROOT="/cm/images/kairos-installer"
+cat > "${IMAGE_ROOT}/etc/systemd/system/kairos-install.service" << 'SERVICE'
+[Unit]
+Description=Install Kairos Raw Disk Image
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStartPre=/bin/bash -c 'sleep 10'
+ExecStart=/usr/local/sbin/install-kairos.sh
+TimeoutStartSec=1800
+StandardOutput=journal+console
+StandardError=journal+console
+[Install]
+WantedBy=multi-user.target
+SERVICE
+chroot "${IMAGE_ROOT}" systemctl enable kairos-install.service 2>&1 || {
+    mkdir -p "${IMAGE_ROOT}/etc/systemd/system/multi-user.target.wants"
+    ln -sf /etc/systemd/system/kairos-install.service "${IMAGE_ROOT}/etc/systemd/system/multi-user.target.wants/kairos-install.service"
+}
+EOF
+
+# 5. PXE template
+info "[5/7] PXE template..."
+${SSH_CMD} << 'EOF' | filter_motd
+for tmpl in /tftpboot/pxelinux.cfg/template /tftpboot/x86_64/bios/pxelinux.cfg/template; do
+    [ -f "$tmpl" ] && grep -q "IPAPPEND 3" "$tmpl" && sed -i 's/IPAPPEND 3/IPAPPEND 2/g' "$tmpl"
+done
+EOF
+
+# 6. Configure category
+info "[6/7] Configuring BCM..."
+${SSH_CMD} << 'EOF' | filter_motd
+IMAGE_ROOT="/cm/images/kairos-installer"
+ACTUAL_KERNEL=$(ls "${IMAGE_ROOT}/boot/vmlinuz-"* 2>/dev/null | head -1 | sed 's|.*/vmlinuz-||')
+if [ -n "$ACTUAL_KERNEL" ]; then
+    [ ! -d "${IMAGE_ROOT}/lib/modules/${ACTUAL_KERNEL}" ] && mkdir -p "${IMAGE_ROOT}/lib/modules/${ACTUAL_KERNEL}"
+    cmsh -c "softwareimage; use kairos-installer; set kernelversion ${ACTUAL_KERNEL}; commit" 2>&1 || true
+fi
+cmsh -c "category; list" 2>/dev/null | grep -q kairos || cmsh -c "category; clone default kairos; commit" 2>/dev/null
+cmsh -c "category; use kairos; set softwareimage kairos-installer; commit" 2>&1 || true
+cmsh -c "category; use kairos; set installmode FULL; commit" 2>&1 || true
+cmsh -c "category; use kairos; set kernelparameters 'console=tty0 console=ttyS0,115200n8'; commit" 2>&1 || true
+cmsh -c "category; use kairos; set installbootrecord yes; commit" 2>&1 || true
+cmsh -c "category; use kairos; monitoring; setup; healthconf; use interfaces; set disabled yes; commit" 2>&1 || true
+cmsh -c "category; use kairos; monitoring; setup; healthconf; use mounts; set disabled yes; commit" 2>&1 || true
+cmsh -c "category; use kairos; monitoring; setup; healthconf; use ntp; set disabled yes; commit" 2>&1 || true
+cmsh -c "partition; use base; set defaultcategory kairos; commit" 2>&1 || true
+cmsh -c "partition; use base; set nodebasename node; set nodedigits 3; commit" 2>&1 || true
+cmsh -c "category; use kairos; set newnodeinstallmode FULL; commit" 2>&1 || true
+EOF
+
+${SSH_CMD} "cmsh -c 'device; use node001; set mac ${COMPUTE_MAC}; set category kairos; commit'" 2>/dev/null | filter_motd || true
+
+# 7. Verify installer files in image + regenerate ramdisk
+info "[7/7] Verifying installer + generating ramdisk..."
+${SSH_CMD} << 'EOF' | filter_motd
+IMAGE_ROOT="/cm/images/kairos-installer"
+# Verify critical files
+if [ ! -x "${IMAGE_ROOT}/usr/local/sbin/install-kairos.sh" ]; then
+    echo "[FAIL] install-kairos.sh missing from image"
+    exit 1
+fi
+if [ ! -f "${IMAGE_ROOT}/etc/systemd/system/kairos-install.service" ]; then
+    echo "[FAIL] kairos-install.service missing from image"
+    exit 1
+fi
+echo "[OK] Installer files verified in image"
+
+# Verify category softwareimage
+VERIFY=$(cmsh -c "category; use kairos; get softwareimage" 2>/dev/null)
+if ! echo "$VERIFY" | grep -q "kairos-installer"; then
+    echo "[WARN] Category softwareimage is '$VERIFY', fixing..."
+    cmsh -c "category; use kairos; set softwareimage kairos-installer; commit" 2>&1
+fi
+
+# Regenerate ramdisk (includes installer files for rsync)
+echo "Generating ramdisk (this takes ~60s)..."
+cmsh -c "softwareimage; use kairos-installer; createramdisk -w" 2>&1
+echo "[OK] Ramdisk regenerated"
+EOF
+
+info "BCM configured for Kairos deployment"

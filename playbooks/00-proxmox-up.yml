@@ -1,0 +1,59 @@
+---
+# Stand up Proxmox testbed — skipped if Proxmox API is already reachable.
+
+- name: Check if Proxmox is already running
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Test Proxmox API reachability
+      ansible.builtin.uri:
+        url: "https://{{ proxmox_api_host }}:{{ proxmox_api_port | default(8006) }}/api2/json"
+        validate_certs: false
+        timeout: 5
+      register: pve_check
+      failed_when: false
+
+    - name: Set Proxmox availability fact
+      ansible.builtin.set_fact:
+        proxmox_already_running: "{{ (pve_check.status | default(0) | int) in [200, 401] }}"
+
+    - name: Skip message
+      ansible.builtin.debug:
+        msg: "Proxmox already running at {{ proxmox_api_host }} — skipping setup"
+      when: proxmox_already_running
+
+- name: Stand up Proxmox testbed
+  hosts: localhost
+  gather_facts: true
+  tasks:
+    - name: Check skip condition
+      ansible.builtin.set_fact:
+        proxmox_already_running: "{{ hostvars['localhost']['proxmox_already_running'] | default(false) }}"
+
+    - name: Run proxmox prereqs
+      ansible.builtin.include_role:
+        name: host_prepare
+      when: not proxmox_already_running
+
+    - name: Run libvirt network setup
+      ansible.builtin.include_role:
+        name: libvirt_network
+      when: not proxmox_already_running
+
+    - name: Run proxmox VM creation
+      ansible.builtin.include_role:
+        name: proxmox_vm
+      when: not proxmox_already_running
+
+- name: Configure Proxmox VM
+  hosts: proxmox
+  gather_facts: false
+  tasks:
+    - name: Check skip condition
+      ansible.builtin.set_fact:
+        proxmox_already_running: "{{ hostvars['localhost']['proxmox_already_running'] | default(false) }}"
+
+    - name: Run proxmox configuration
+      ansible.builtin.include_role:
+        name: proxmox_configure
+      when: not proxmox_already_running

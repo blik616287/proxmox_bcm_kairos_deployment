@@ -1,0 +1,42 @@
+#!/bin/bash
+set -euo pipefail
+LOG="/dev/shm/kairos-install.log"
+exec > >(tee -a "$LOG") 2>&1
+HEAD_IP="{{ bcm_internal_ip }}"
+RAW_URL="http://${HEAD_IP}:8888/disk.raw.gz"
+DISK=$(lsblk -ndo NAME,TYPE | awk '$2=="disk" && $1!~/^fd[0-9]/{print "/dev/"$1; exit}')
+echo "[$(date)] Kairos Raw Image Installer"
+echo "[$(date)] URL: ${RAW_URL}  Target: ${DISK:-NOT FOUND}"
+[[ -z "$DISK" || ! -b "$DISK" ]] && { echo "ERROR: No disk"; exit 1; }
+RETRIES=0
+while ! curl --fail --silent --head "$RAW_URL" >/dev/null 2>&1; do
+    RETRIES=$((RETRIES + 1)); (( RETRIES >= 60 )) && { echo "ERROR: Server unreachable"; exit 1; }; sleep 10
+done
+echo "[$(date)] Staging binaries to RAM..."
+RAMDIR="/dev/shm/kinstall"
+mkdir -p "$RAMDIR/lib"
+for bin in bash curl gunzip dd sync reboot sleep; do
+    BIN_PATH=$(which "$bin" 2>/dev/null) && cp "$BIN_PATH" "$RAMDIR/" || true
+done
+for b in "$RAMDIR"/*; do
+    [ -f "$b" ] && [ -x "$b" ] || continue
+    ldd "$b" 2>/dev/null | awk '/=>/ {print $3} !/=>/ && /^\// {print $1}' | while read -r l; do
+        [ -f "$l" ] && cp -n "$l" "$RAMDIR/lib/" 2>/dev/null || true
+    done || true
+done
+cat > "$RAMDIR/run-dd.sh" << DDEOF
+#!/dev/shm/kinstall/bash
+export LD_LIBRARY_PATH="/dev/shm/kinstall/lib"
+echo "[\$(date)] Writing to ${DISK}..."
+/dev/shm/kinstall/curl --fail -s "${RAW_URL}" | /dev/shm/kinstall/gunzip | /dev/shm/kinstall/dd of="${DISK}" bs=16M conv=fsync 2>&1
+/dev/shm/kinstall/sync
+echo "[\$(date)] Done. Rebooting..."
+/dev/shm/kinstall/sleep 2
+echo s > /proc/sysrq-trigger 2>/dev/null || true
+/dev/shm/kinstall/sleep 1
+echo b > /proc/sysrq-trigger
+DDEOF
+chmod +x "$RAMDIR/run-dd.sh"
+echo "[$(date)] Starting dd..."
+export LD_LIBRARY_PATH="$RAMDIR/lib"
+exec "$RAMDIR/bash" "$RAMDIR/run-dd.sh"

@@ -1,0 +1,26 @@
+---
+# validate — Run 18-point validation on Kairos node via BCM jump host.
+
+- name: Read BCM VM IP
+  ansible.builtin.slurp:
+    src: "{{ build_dir }}/.bcm-ip"
+  register: bcm_ip_file
+
+- name: Set BCM IP fact
+  ansible.builtin.set_fact:
+    bcm_vm_ip: "{{ bcm_ip_file.content | b64decode | trim }}"
+
+- name: Render validate script
+  ansible.builtin.template:
+    src: validate.sh.j2
+    dest: "{{ build_dir }}/validate.sh"
+    mode: "0755"
+
+- name: Run validation
+  ansible.builtin.shell: "{{ build_dir }}/validate.sh"
+  register: validate_result
+  failed_when: false
+
+- name: Show validation output
+  ansible.builtin.debug:
+    msg: "{{ validate_result.stdout_lines }}"

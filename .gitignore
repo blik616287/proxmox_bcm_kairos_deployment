@@ -1,0 +1,28 @@
+# Large binaries
+*.iso
+*.qcow2
+*.img
+*.raw
+
+# Build output
+build/
+
+# Downloaded ISOs
+dist/
+
+# Logs
+logs/
+
+# Credentials (contains secrets)
+inventory/group_vars/all.yml
+
+# Claude Code
+.claude/
+CLAUDE.md
+
+# CanvOS submodule
+CanvOS/
+
+# Temp work directories
+.bcm-work.*
+.bcm-prep.*

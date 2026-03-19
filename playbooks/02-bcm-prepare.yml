@@ -1,0 +1,7 @@
+---
+# Download BCM ISO, patch rootfs, remaster ISO for Proxmox auto-install.
+- name: Prepare BCM auto-install ISO
+  hosts: localhost
+  gather_facts: true
+  roles:
+    - bcm_prepare

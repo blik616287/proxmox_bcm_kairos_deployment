@@ -1,0 +1,253 @@
+---
+# BCM Head Node VM — direct kernel boot install, then boot from disk.
+#
+# NIC order: net0 = internal (vmbr1), net1 = external (vmbr0).
+# With net.ifnames=0, these become eth0 and eth1.
+
+# ---- Upload artifacts to Proxmox ----
+
+- name: Upload BCM kernel to Proxmox
+  tags: [create]
+  ansible.builtin.copy:
+    src: "{{ build_dir }}/.bcm-kernel"
+    dest: /var/lib/vz/images/bcm-kernel
+    mode: "0644"
+
+- name: Upload patched rootfs to Proxmox
+  tags: [create]
+  ansible.builtin.copy:
+    src: "{{ build_dir }}/.bcm-rootfs-auto.cgz"
+    dest: /var/lib/vz/images/bcm-rootfs-auto.cgz
+    mode: "0644"
+
+- name: Upload original BCM ISO to Proxmox
+  tags: [create]
+  ansible.builtin.copy:
+    src: "{{ dist_dir }}/{{ iso_filename }}"
+    dest: "/var/lib/vz/template/iso/{{ iso_filename }}"
+    mode: "0644"
+
+- name: Upload BCM config drive to Proxmox
+  tags: [create]
+  ansible.builtin.copy:
+    src: "{{ build_dir }}/.bcm-init.img"
+    dest: /var/lib/vz/images/bcm-init.img
+    mode: "0644"
+
+# ---- Check if VM exists ----
+
+- name: Check if BCM VM exists
+  tags: [create, start, stop]
+  ansible.builtin.shell: qm status {{ bcm_vmid }}
+  register: bcm_vm_check
+  changed_when: false
+  failed_when: false
+
+# ---- Create + Install ----
+
+- name: Create and install BCM head node
+  tags: [create]
+  when: bcm_vm_check.rc != 0
+  block:
+    - name: Create serial log directory
+      ansible.builtin.file:
+        path: /var/log/e2e
+        state: directory
+
+    - name: Create BCM VM with direct kernel boot and serial logging
+      ansible.builtin.shell: |
+        qm create {{ bcm_vmid }} \
+          --name {{ bcm_vm_name }} \
+          --memory {{ bcm_vm_memory }} \
+          --cores {{ bcm_vm_cores }} \
+          --bios seabios \
+          --net0 virtio={{ bcm_vm_mac_internal }},bridge={{ bcm_internal_bridge }} \
+          --net1 virtio={{ bcm_vm_mac_external }},bridge=vmbr0 \
+          --scsi0 local-lvm:{{ bcm_vm_disk_size | regex_replace('G$', '') }},format=raw \
+          --scsihw virtio-scsi-pci \
+          --ide2 local:iso/{{ iso_filename }},media=cdrom \
+          --ostype l26 \
+          --args '-kernel /var/lib/vz/images/bcm-kernel -initrd /var/lib/vz/images/bcm-rootfs-auto.cgz -append "ro dvdinstall systemd.unit=multi-user.target net.ifnames=0 biosdevname=0 console=tty0 console=ttyS0,115200" -drive file=/var/lib/vz/images/bcm-init.img,format=raw,if=virtio -chardev file,id=serial0,path=/var/log/e2e/bcm-serial.log -serial chardev:serial0'
+
+    - name: Start BCM VM (direct kernel boot into installer)
+      ansible.builtin.shell: qm start {{ bcm_vmid }}
+
+    # The installer writes to disk (~20 min) then reboots (--autoreboot).
+    # Since direct kernel boot is still active, the VM re-enters the ramdisk.
+    # We detect completion by watching disk writes plateau, then waiting for
+    # the write total to stabilize for 2 consecutive checks.
+    - name: Wait for BCM install to complete (watch disk writes, up to 45 min)
+      ansible.builtin.shell: |
+        TIMEOUT=2700
+        ELAPSED=0
+        PREV_WRITES=0
+        STABLE_COUNT=0
+        echo "Monitoring disk writes..."
+        # First wait for writes to start (installer booting up)
+        while [ $ELAPSED -lt 300 ]; do
+          WRITES=$(qm status {{ bcm_vmid }} --verbose 2>/dev/null | awk '/diskwrite/{print $2}')
+          if [ "${WRITES:-0}" -gt 10000000 ]; then
+            echo "Install started: ${WRITES} bytes written at ${ELAPSED}s"
+            break
+          fi
+          sleep 10
+          ELAPSED=$((ELAPSED + 10))
+        done
+        # Now wait for writes to plateau (install finished)
+        while [ $ELAPSED -lt $TIMEOUT ]; do
+          WRITES=$(qm status {{ bcm_vmid }} --verbose 2>/dev/null | awk '/diskwrite/{print $2}')
+          echo "Waiting... ${ELAPSED}s writes=${WRITES}"
+          if [ "$WRITES" = "$PREV_WRITES" ] && [ "${WRITES:-0}" -gt 1000000000 ]; then
+            STABLE_COUNT=$((STABLE_COUNT + 1))
+            if [ $STABLE_COUNT -ge 3 ]; then
+              echo "INSTALL_DONE: writes stable at ${WRITES} for 90s (${ELAPSED}s total)"
+              exit 0
+            fi
+          else
+            STABLE_COUNT=0
+          fi
+          PREV_WRITES="$WRITES"
+          sleep 30
+          ELAPSED=$((ELAPSED + 30))
+        done
+        echo "TIMEOUT after ${TIMEOUT}s"
+        exit 1
+      async: 2700
+      poll: 30
+
+    - name: Stop BCM VM after install
+      ansible.builtin.shell: |
+        qm stop {{ bcm_vmid }}
+        sleep 5
+
+    - name: Switch BCM VM to disk boot (remove direct kernel boot + CDROM)
+      ansible.builtin.shell: |
+        qm set {{ bcm_vmid }} \
+          --ide2 none,media=cdrom \
+          --boot order=scsi0 \
+          --delete args
+
+# ---- Start from disk ----
+
+- name: Start BCM VM from disk
+  tags: [create, start]
+  ansible.builtin.shell: |
+    STATUS=$(qm status {{ bcm_vmid }} | awk '{print $2}')
+    if [ "$STATUS" != "running" ]; then
+      qm start {{ bcm_vmid }}
+    else
+      echo "Already running"
+    fi
+  register: bcm_start_result
+  changed_when: "'Already running' not in bcm_start_result.stdout"
+
+# ---- Discover IP + wait for SSH ----
+
+# Discover BCM's external IP: add a temp IP on vmbr1 so Proxmox can
+# reach BCM's internal IP (10.141.255.254), then SSH to BCM and ask
+# for eth1's IP (which is on vmbr0, reachable from the host).
+- name: Install sshpass on Proxmox host
+  tags: [create, start]
+  ansible.builtin.apt:
+    name: sshpass
+    state: present
+
+- name: Add temporary IP on vmbr1 for BCM access
+  tags: [create, start]
+  ansible.builtin.shell: |
+    ip addr show vmbr1 | grep -q "10.141.0.1" || ip addr add 10.141.0.1/16 dev vmbr1
+  changed_when: false
+
+- name: Wait for BCM SSH on internal IP ({{ bcm_internal_ip }})
+  tags: [create, start]
+  ansible.builtin.shell: |
+    TIMEOUT=300
+    ELAPSED=0
+    while [ $ELAPSED -lt $TIMEOUT ]; do
+      if sshpass -p "{{ bcm_password }}" ssh \
+          -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+          -o LogLevel=ERROR -o ConnectTimeout=5 \
+          root@{{ bcm_internal_ip }} "echo ok" >/dev/null 2>&1; then
+        echo "SSH ready on internal IP"
+        exit 0
+      fi
+      sleep 10
+      ELAPSED=$((ELAPSED + 10))
+    done
+    echo "TIMEOUT"
+    exit 1
+
+- name: Discover BCM external IP from eth1
+  tags: [create, start]
+  ansible.builtin.shell: |
+    # Filter out BCM MOTD noise (cmfirstboot banner) — only grab the IP
+    RAW=$(sshpass -p "{{ bcm_password }}" ssh \
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+      root@{{ bcm_internal_ip }} \
+      "ip -4 addr show eth1 2>/dev/null | grep -oP 'inet \K[0-9.]+'" 2>/dev/null)
+    echo "$RAW" | grep -oP '^\d+\.\d+\.\d+\.\d+$' | head -1
+  register: bcm_ip_discovery
+  changed_when: false
+
+- name: Set BCM external IP fact
+  tags: [create, start]
+  ansible.builtin.set_fact:
+    bcm_vm_ip: "{{ bcm_ip_discovery.stdout | trim }}"
+
+- name: Verify BCM SSH from host on external IP
+  tags: [create, start]
+  ansible.builtin.shell: |
+    sshpass -p "{{ bcm_password }}" ssh \
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      -o LogLevel=ERROR -o ConnectTimeout=10 \
+      root@{{ bcm_vm_ip }} "hostname"
+  delegate_to: localhost
+  register: bcm_hostname_check
+
+- name: Show BCM connectivity
+  tags: [create, start]
+  ansible.builtin.debug:
+    msg: "BCM {{ bcm_hostname_check.stdout | trim }} reachable at {{ bcm_vm_ip }} (external) and {{ bcm_internal_ip }} (internal)"
+
+- name: Wait for cmfirstboot to complete
+  tags: [create, start]
+  ansible.builtin.shell: |
+    TIMEOUT=1800
+    ELAPSED=0
+    while [ $ELAPSED -lt $TIMEOUT ]; do
+      STATUS=$(sshpass -p "{{ bcm_password }}" ssh \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o LogLevel=ERROR -o ConnectTimeout=5 \
+        root@{{ bcm_vm_ip }} \
+        "systemctl is-active cmfirstboot 2>/dev/null || echo inactive" 2>/dev/null | grep -oE 'active|activating|inactive' | tail -1)
+      if [ "$STATUS" != "active" ] && [ "$STATUS" != "activating" ]; then
+        echo "cmfirstboot done (status: ${STATUS:-inactive})"
+        exit 0
+      fi
+      sleep 15
+      ELAPSED=$((ELAPSED + 15))
+      echo "cmfirstboot: ${STATUS} (${ELAPSED}s)"
+    done
+    echo "TIMEOUT"
+    exit 1
+  delegate_to: localhost
+  timeout: 1800
+
+- name: Display BCM VM info
+  tags: [create, start]
+  ansible.builtin.debug:
+    msg: "BCM head node ready at {{ bcm_vm_ip }} (VMID {{ bcm_vmid }})"
+
+- name: Save BCM IP for downstream tasks
+  tags: [create, start]
+  ansible.builtin.copy:
+    content: "{{ bcm_vm_ip }}"
+    dest: "{{ build_dir }}/.bcm-ip"
+    mode: "0644"
+  delegate_to: localhost
+
+# ---- Stop ----
+
+- name: Stop BCM VM
+  tags: [stop, never]
+  ansible.builtin.shell: qm stop {{ bcm_vmid }} || true

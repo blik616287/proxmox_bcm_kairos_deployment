@@ -1,0 +1,12 @@
+---
+# Create an isolated internal bridge (vmbr1) inside Proxmox for BCM ↔ Kairos communication.
+# This bridge has no IP on the Proxmox host — BCM and Kairos VMs configure their own IPs.
+#
+# Usage:
+#   ansible-playbook playbooks/01-create-internal-network.yml
+
+- name: Create internal cluster network in Proxmox
+  hosts: proxmox
+  gather_facts: false
+  roles:
+    - proxmox_internal_network

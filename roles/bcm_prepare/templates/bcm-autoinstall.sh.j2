@@ -1,0 +1,91 @@
+#!/bin/bash
+# BCM Fully Automated Head Node Install — rendered by Ansible
+export DEBIAN_FRONTEND=noninteractive
+LOG="/var/log/bcm-auto-install.log"
+exec </dev/null >>/dev/console 2>&1
+exec > >(tee -a "$LOG" >/dev/console) 2>&1
+
+systemctl stop serial-getty@ttyS0.service 2>/dev/null || true
+systemctl stop getty@tty1.service 2>/dev/null || true
+clear >/dev/console 2>/dev/null || true
+
+echo ""
+echo "=========================================="
+echo " BCM Automated Installation"
+echo " $(date)"
+echo "=========================================="
+
+PASS="{{ bcm_password }}"
+mkdir -p /mnt/config
+for dev in /dev/vdb /dev/sdb /dev/vdb1 /dev/sdb1; do
+    if [ -b "$dev" ]; then
+        if mount "$dev" /mnt/config 2>/dev/null; then
+            [ -f /mnt/config/password.txt ] && PASS=$(cat /mnt/config/password.txt)
+            echo "[OK] Config drive from $dev"
+            break
+        fi
+    fi
+done
+
+echo "[..] Waiting for installer environment..."
+TRIES=0
+while [ ! -f /var/www/htdocs/content/masterdisklayouts/master-one-big-partition.xml ] && [ "$TRIES" -lt 60 ]; do
+    sleep 2; (( TRIES++ ))
+done
+[ ! -f /var/www/htdocs/content/masterdisklayouts/master-one-big-partition.xml ] && { echo "[FAIL] Installer env not ready"; exit 1; }
+echo "[OK] Installer environment ready"
+
+echo "[..] Mounting installation media..."
+mkdir -p /mnt/cdrom
+ISODEVICE=""
+for dev in /dev/sr0 /dev/sr1 /dev/cdrom /dev/dvd; do
+    if [ -b "$dev" ] && mount -o ro "$dev" /mnt/cdrom 2>/dev/null; then
+        ISODEVICE="$dev"; echo "[OK] ISO from $dev"; break
+    fi
+done
+if [ -z "$ISODEVICE" ]; then
+    LABEL_DEV=$(findfs LABEL=BCMINSTALLERHEAD 2>/dev/null || true)
+    [ -n "$LABEL_DEV" ] && [ -b "$LABEL_DEV" ] && mount -o ro "$LABEL_DEV" /mnt/cdrom 2>/dev/null
+fi
+if ! mountpoint -q /mnt/cdrom || [ ! -d /mnt/cdrom/data ]; then
+    echo "[FAIL] Could not mount installation media"; lsblk; exit 1
+fi
+
+echo "=========================================="
+echo " Running cm-master-install"
+echo "=========================================="
+cd /cm
+yes | perl ./cm-master-install --config /cm/build-config.xml --mountpath /mnt/cdrom --password "$PASS" --autoreboot 2>&1 | tee -a "$LOG"
+RETVAL=${PIPESTATUS[1]}
+if [ $RETVAL -ne 0 ]; then
+    echo " INSTALLATION FAILED (exit code: $RETVAL)"; exit $RETVAL
+fi
+
+echo "[..] Fixing GRUB..."
+vgchange -ay 2>/dev/null || true; sleep 1
+INSTALLED_ROOT=""
+mkdir -p /mnt/installed
+for part in $(ls /dev/mapper/*-root /dev/mapper/*root 2>/dev/null) /dev/vda5 /dev/sda5 \
+    $(lsblk -rno PATH,FSTYPE 2>/dev/null | awk '$2 == "ext4" || $2 == "xfs" {print $1}') \
+    /dev/vda2 /dev/vda1 /dev/sda2 /dev/sda1; do
+    [ -b "$part" ] || continue
+    if mount "$part" /mnt/installed 2>/dev/null; then
+        if [ -f /mnt/installed/etc/default/grub ]; then INSTALLED_ROOT="$part"; break; fi
+        umount /mnt/installed 2>/dev/null
+    fi
+done
+if [ -n "$INSTALLED_ROOT" ]; then
+    grep -q "net.ifnames=0" /mnt/installed/etc/default/grub || \
+        sed -i 's/biosdevname=0/net.ifnames=0 biosdevname=0/' /mnt/installed/etc/default/grub
+    BOOT_PART=""
+    for bp in /dev/vda1 /dev/sda1; do
+        [ -b "$bp" ] && mount "$bp" /mnt/installed/boot 2>/dev/null && BOOT_PART="$bp" && break
+    done
+    [ -f /mnt/installed/boot/grub/grub.cfg ] && \
+        sed -i 's/biosdevname=0/net.ifnames=0 biosdevname=0/g' /mnt/installed/boot/grub/grub.cfg
+    [ -n "$BOOT_PART" ] && umount /mnt/installed/boot 2>/dev/null
+    umount /mnt/installed 2>/dev/null
+fi
+echo "=========================================="
+echo " INSTALLATION COMPLETE - rebooting..."
+echo "=========================================="

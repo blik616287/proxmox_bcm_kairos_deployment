@@ -1,0 +1,7 @@
+---
+# Build Kairos ISO via CanvOS + generate raw disk image.
+- name: Build Kairos artifacts
+  hosts: localhost
+  gather_facts: true
+  roles:
+    - kairos_build

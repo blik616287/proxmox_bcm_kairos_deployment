@@ -1,0 +1,37 @@
+---
+# deploy_dd — Upload raw image to BCM, configure installer + kairos category.
+# Runs on localhost. Requires BCM VM IP in build/.bcm-ip.
+
+- name: Read BCM VM IP
+  ansible.builtin.slurp:
+    src: "{{ build_dir }}/.bcm-ip"
+  register: bcm_ip_file
+
+- name: Set BCM IP fact
+  ansible.builtin.set_fact:
+    bcm_vm_ip: "{{ bcm_ip_file.content | b64decode | trim }}"
+
+- name: Verify raw disk image exists
+  ansible.builtin.stat:
+    path: "{{ build_dir }}/kairos-disk.raw"
+  register: raw_image
+  failed_when: not raw_image.stat.exists
+
+- name: Render install-kairos.sh from template
+  ansible.builtin.template:
+    src: install-kairos.sh.j2
+    dest: "{{ build_dir }}/install-kairos.sh"
+    mode: "0755"
+
+- name: Render deploy-dd.sh from template
+  ansible.builtin.template:
+    src: deploy-dd.sh.j2
+    dest: "{{ build_dir }}/deploy-dd.sh"
+    mode: "0755"
+
+- name: Run deploy-dd script
+  ansible.builtin.shell: "{{ build_dir }}/deploy-dd.sh"
+  environment:
+    PATH: "{{ ansible_env.PATH }}"
+  async: 3600
+  poll: 15

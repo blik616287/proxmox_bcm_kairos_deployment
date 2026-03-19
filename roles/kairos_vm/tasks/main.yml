@@ -1,0 +1,89 @@
+---
+# Kairos Compute Node VM — fully autonomous boot:
+#   Boot order: disk first, PXE fallback.
+#   1. First boot: disk empty → falls through to PXE → BCM provisions installer
+#   2. Installer boots from disk → dd writes Kairos (BIOS GRUB-pc) → sysrq reboot
+#   3. Next boot: disk has GRUB-pc in MBR → boots Kairos directly. Done.
+#
+# No external BIOS switching or boot order changes needed.
+
+- name: Check if Kairos VM exists
+  tags: [create, stop]
+  ansible.builtin.shell: qm status {{ kairos_vmid }}
+  register: kairos_vm_check
+  changed_when: false
+  failed_when: false
+
+- name: Create Kairos compute node VM
+  tags: [create]
+  when: kairos_vm_check.rc != 0
+  ansible.builtin.shell: |
+    qm create {{ kairos_vmid }} \
+      --name {{ kairos_vm_name }} \
+      --memory {{ kairos_vm_memory }} \
+      --cores {{ kairos_vm_cores }} \
+      --bios seabios \
+      --net0 virtio={{ kairos_vm_mac }},bridge={{ bcm_internal_bridge }} \
+      --virtio0 local-lvm:{{ kairos_vm_disk_size | regex_replace('G$', '') }},format=raw \
+      --boot order='virtio0;net0' \
+      --ostype l26
+
+- name: Start Kairos VM
+  tags: [create]
+  ansible.builtin.shell: |
+    STATUS=$(qm status {{ kairos_vmid }} 2>/dev/null | awk '{print $2}')
+    [ "$STATUS" != "running" ] && qm start {{ kairos_vmid }} || echo "Already running"
+  register: kairos_start_result
+  changed_when: "'Already running' not in kairos_start_result.stdout"
+
+- name: Display Kairos VM info
+  tags: [create]
+  ansible.builtin.debug:
+    msg: >-
+      Kairos VM started (VMID {{ kairos_vmid }}, SeaBIOS, disk-first boot).
+      Empty disk falls through to PXE. BCM provisions, dd writes Kairos,
+      next boot finds GRUB-pc in MBR and boots Kairos autonomously.
+
+# ---- Wait for Kairos to boot ----
+
+- name: Read BCM VM IP
+  tags: [create]
+  ansible.builtin.slurp:
+    src: "{{ build_dir }}/.bcm-ip"
+  register: bcm_ip_file
+  delegate_to: localhost
+
+- name: Set BCM IP fact
+  tags: [create]
+  ansible.builtin.set_fact:
+    bcm_vm_ip: "{{ bcm_ip_file.content | b64decode | trim }}"
+
+- name: Render Kairos boot wait script
+  tags: [create]
+  ansible.builtin.template:
+    src: wait-kairos-boot.sh.j2
+    dest: "{{ build_dir }}/wait-kairos-boot.sh"
+    mode: "0755"
+  delegate_to: localhost
+
+- name: Wait for Kairos to fully boot (up to 30 min)
+  tags: [create]
+  ansible.builtin.shell: "{{ build_dir }}/wait-kairos-boot.sh"
+  delegate_to: localhost
+  register: kairos_boot_result
+  timeout: 1800
+
+- name: Show Kairos boot result
+  tags: [create]
+  ansible.builtin.debug:
+    msg: "{{ kairos_boot_result.stdout_lines | default(['unknown']) | last }}"
+
+# ---- Stop / Destroy ----
+
+- name: Stop Kairos VM
+  tags: [stop, never]
+  ansible.builtin.shell: qm stop {{ kairos_vmid }} || true
+
+- name: Destroy Kairos VM
+  tags: [destroy, never]
+  ansible.builtin.shell: qm stop {{ kairos_vmid }} 2>/dev/null || true; qm destroy {{ kairos_vmid }} --purge 2>/dev/null || true

@@ -1,0 +1,112 @@
+#!/bin/bash
+# validate.sh — 18-point validation, rendered by Ansible.
+set -euo pipefail
+
+BCM_HOST="{{ bcm_vm_ip }}"
+BCM_PASSWORD="{{ bcm_password }}"
+COMPUTE_MAC="{{ kairos_vm_mac }}"
+KAIROS_USER="kairos"
+KAIROS_PASSWORD="kairos"
+
+SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
+BCM_SSH="sshpass -p ${BCM_PASSWORD} ssh ${SSH_OPTS} root@${BCM_HOST}"
+
+filter_motd() { grep -vE "cmfirstboot is still in progress|^$" || true; }
+
+PASS=0; FAIL=0; WARN=0
+check() {
+    local name="$1" result="$2" detail="$3"
+    if [[ "$result" == "PASS" ]]; then echo "  [PASS] ${name}"; PASS=$((PASS+1))
+    elif [[ "$result" == "WARN" ]]; then echo "  [WARN] ${name}"; WARN=$((WARN+1))
+    else echo "  [FAIL] ${name}"; FAIL=$((FAIL+1)); fi
+    [[ -n "$detail" ]] && echo "         ${detail}"
+}
+
+echo "============================================"
+echo " Kairos Node Validation"
+echo "============================================"
+
+${BCM_SSH} "echo ok" &>/dev/null || { echo "ERROR: Cannot SSH to BCM at ${BCM_HOST}"; exit 1; }
+
+KAIROS_IP=$(${BCM_SSH} "arp -an 2>/dev/null | grep '${COMPUTE_MAC}' | grep -oP '\\d+\\.\\d+\\.\\d+\\.\\d+'" 2>/dev/null | filter_motd)
+[[ -z "$KAIROS_IP" ]] && { echo "ERROR: Kairos node not found"; exit 1; }
+echo "Kairos IP: ${KAIROS_IP}"
+
+KAIROS_SSH=""
+for attempt in $(seq 1 12); do
+    T=$(${BCM_SSH} "ssh ${SSH_OPTS} -o ConnectTimeout=5 root@${KAIROS_IP} 'echo CONNECTED' 2>&1" 2>/dev/null | filter_motd || true)
+    if [[ "$T" == *"CONNECTED"* ]]; then KAIROS_SSH="ssh ${SSH_OPTS} root@${KAIROS_IP}"; break; fi
+    T=$(${BCM_SSH} "sshpass -p ${KAIROS_PASSWORD} ssh ${SSH_OPTS} -o ConnectTimeout=5 -o PreferredAuthentications=password -o PubkeyAuthentication=no ${KAIROS_USER}@${KAIROS_IP} 'echo CONNECTED' 2>&1" 2>/dev/null | filter_motd || true)
+    if [[ "$T" == *"CONNECTED"* ]]; then
+        KAIROS_SSH="sshpass -p ${KAIROS_PASSWORD} ssh ${SSH_OPTS} -o PreferredAuthentications=password -o PubkeyAuthentication=no ${KAIROS_USER}@${KAIROS_IP}"; break
+    fi
+    (( attempt < 12 )) && sleep 10
+done
+[[ -z "$KAIROS_SSH" ]] && { echo "ERROR: Cannot SSH to Kairos"; exit 1; }
+
+run_on_kairos() { ${BCM_SSH} "${KAIROS_SSH} '$1'" 2>/dev/null | filter_motd; }
+
+VALIDATION=$(${BCM_SSH} "${KAIROS_SSH} '
+echo \"===OS_RELEASE===\"; cat /etc/os-release 2>/dev/null
+echo \"===KAIROS_RELEASE===\"; cat /etc/kairos-release 2>/dev/null || echo MISSING
+echo \"===KAIROS_VERSION===\"; kairos-agent version 2>/dev/null || echo MISSING
+echo \"===KERNEL===\"; uname -r
+echo \"===CMDLINE===\"; cat /proc/cmdline
+echo \"===SYSTEMD_KAIROS===\"; systemctl list-units --all --no-pager 2>/dev/null | grep -iE \"kairos|k3s|stylus\" || echo NONE
+echo \"===NETWORK===\"; ip -4 addr show 2>/dev/null | grep inet
+echo \"===COS_OEM===\"; blkid -L COS_OEM 2>/dev/null || echo MISSING
+echo \"===COS_STATE===\"; blkid -L COS_STATE 2>/dev/null || echo MISSING
+echo \"===COS_RECOVERY===\"; blkid -L COS_RECOVERY 2>/dev/null || echo MISSING
+echo \"===COS_PERSISTENT===\"; blkid -L COS_PERSISTENT 2>/dev/null || echo MISSING
+echo \"===ROOT_MOUNT===\"; mount | grep \" / \" | head -1 || echo MISSING
+echo \"===COS_LAYOUT===\"; cat /run/cos/cos-layout.env 2>/dev/null || echo MISSING
+echo \"===END===\"
+'" 2>/dev/null | filter_motd)
+
+get_section() { echo "$VALIDATION" | sed -n "/===${1}===/,/===.*===/p" | grep -v "^===" | head -20 || true; }
+
+echo ""; echo "-- OS --"
+OS=$(get_section OS_RELEASE | grep "^PRETTY_NAME=" | cut -d'"' -f2)
+[[ -n "$OS" ]] && check "OS" "PASS" "$OS" || check "OS" "FAIL" ""
+KR=$(get_section KAIROS_RELEASE)
+[[ "$KR" != "MISSING" && -n "$KR" ]] && check "Kairos release" "PASS" "$(echo "$KR" | grep KAIROS_VERSION | head -1 | cut -d= -f2)" || check "Kairos release" "FAIL" ""
+KA=$(get_section KAIROS_VERSION)
+[[ "$KA" != "MISSING" && -n "$KA" ]] && check "kairos-agent" "PASS" "$KA" || check "kairos-agent" "FAIL" ""
+
+echo ""; echo "-- Boot --"
+K=$(get_section KERNEL); [[ -n "$K" ]] && check "Kernel" "PASS" "$K" || check "Kernel" "FAIL" ""
+CL=$(get_section CMDLINE); echo "$CL" | grep -q "stylus.registration" && check "Registration" "PASS" "" || check "Registration" "WARN" ""
+
+echo ""; echo "-- Network --"
+NET=$(get_section NETWORK)
+[[ -n "$NET" ]] && check "Interface" "PASS" "$(echo "$NET" | grep -v 127.0.0 | head -1 | awk '{print $2}')" || check "Interface" "FAIL" ""
+
+echo ""; echo "-- Services --"
+SVC=$(get_section SYSTEMD_KAIROS)
+[[ "$SVC" != "NONE" && -n "$SVC" ]] && check "Kairos services" "PASS" "$(echo "$SVC" | wc -l) found" || check "Kairos services" "FAIL" ""
+echo "$SVC" | grep -q "stylus-agent.*running" && check "stylus-agent" "PASS" "" || check "stylus-agent" "FAIL" ""
+CMD_N=$(run_on_kairos 'ps aux | grep "cmd -s -n" | grep -v grep | wc -l' || echo 0)
+(( CMD_N > 0 )) && check "BCM cmd" "PASS" "${CMD_N} proc" || check "BCM cmd" "WARN" ""
+
+echo ""; echo "-- Config --"
+check "SSH login" "PASS" "${KAIROS_IP}"
+UD=$(run_on_kairos 'test -f /oem/99_bcm.yaml && echo p || test -f /oem/99_userdata.yaml && echo p || echo m' || true)
+[[ "$UD" == *"p"* ]] && check "Cloud-config" "PASS" "" || check "Cloud-config" "FAIL" ""
+RL=$(run_on_kairos 'journalctl -u stylus-agent --no-pager' || true)
+echo "$RL" | grep -q "registering edge host device" && check "Palette reg" "PASS" "" || check "Palette reg" "WARN" ""
+
+echo ""; echo "-- COS Partitions --"
+for lbl in COS_OEM COS_RECOVERY COS_STATE COS_PERSISTENT; do
+    D=$(get_section "$lbl")
+    [[ "$D" != "MISSING" && -n "$D" ]] && check "$lbl" "PASS" "$D" || check "$lbl" "WARN" ""
+done
+RM=$(get_section ROOT_MOUNT)
+echo "$RM" | grep -qE "ro,|ro " && check "Root immutable" "PASS" "" || check "Root immutable" "WARN" ""
+CLE=$(get_section COS_LAYOUT)
+[[ "$CLE" != "MISSING" && -n "$CLE" ]] && check "COS layout" "PASS" "" || check "COS layout" "WARN" ""
+
+TOTAL=$((PASS+FAIL+WARN))
+echo ""; echo "============================================"
+echo " PASS: ${PASS}/${TOTAL}  WARN: ${WARN}/${TOTAL}  FAIL: ${FAIL}/${TOTAL}"
+echo "============================================"
+(( FAIL > 0 )) && exit 1 || exit 0
