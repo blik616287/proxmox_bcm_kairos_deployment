@@ -105,14 +105,15 @@ cmsh -c "softwareimage; list" 2>/dev/null | grep -q kairos-installer || \
 echo "[OK] kairos-installer image ready"
 EOF
 
-# 4. Install dd script + service into node-installer (NFS root for PXE-booted nodes)
-info "[4/7] Installing dd service into node-installer..."
-${SSH_CMD} "mkdir -p /cm/shared/kairos /cm/node-installer/usr/local/sbin /cm/node-installer/etc/systemd/system"
-${SCP_CMD} "${BUILD_DIR}/install-kairos.sh" root@${BCM_HOST}:/cm/node-installer/usr/local/sbin/install-kairos.sh
-${SSH_CMD} "chmod +x /cm/node-installer/usr/local/sbin/install-kairos.sh"
+# 4. Install dd script + service into software image
+info "[4/7] Installing dd service into software image..."
+${SSH_CMD} "mkdir -p /cm/shared/kairos /cm/images/kairos-installer/usr/local/sbin /cm/images/kairos-installer/etc/systemd/system"
+${SCP_CMD} "${BUILD_DIR}/install-kairos.sh" root@${BCM_HOST}:/cm/images/kairos-installer/usr/local/sbin/install-kairos.sh
+${SSH_CMD} "chmod +x /cm/images/kairos-installer/usr/local/sbin/install-kairos.sh"
 
 ${SSH_CMD} << 'EOF' | filter_motd
-cat > /cm/node-installer/etc/systemd/system/kairos-install.service << 'SERVICE'
+IMAGE_ROOT="/cm/images/kairos-installer"
+cat > "${IMAGE_ROOT}/etc/systemd/system/kairos-install.service" << 'SERVICE'
 [Unit]
 Description=Install Kairos Raw Disk Image
 After=network-online.target
@@ -127,9 +128,13 @@ StandardError=journal+console
 [Install]
 WantedBy=multi-user.target
 SERVICE
-mkdir -p /cm/node-installer/etc/systemd/system/multi-user.target.wants
-ln -sf /etc/systemd/system/kairos-install.service /cm/node-installer/etc/systemd/system/multi-user.target.wants/kairos-install.service
-echo "[OK] Install script + service in /cm/node-installer/"
+chroot "${IMAGE_ROOT}" systemctl enable kairos-install.service 2>&1 || {
+    mkdir -p "${IMAGE_ROOT}/etc/systemd/system/multi-user.target.wants"
+    ln -sf /etc/systemd/system/kairos-install.service "${IMAGE_ROOT}/etc/systemd/system/multi-user.target.wants/kairos-install.service"
+}
+# Tell BCM about the new files so rsync includes them
+cmsh -c "softwareimage updateprovisioners" 2>&1 || true
+echo "[OK] Install script + service in software image, provisioners updated"
 EOF
 
 # 5. PXE template + syslinux modules
@@ -158,9 +163,9 @@ if [ -n "$ACTUAL_KERNEL" ]; then
 fi
 cmsh -c "category; list" 2>/dev/null | grep -q kairos || cmsh -c "category; clone default kairos; commit" 2>/dev/null
 cmsh -c "category; use kairos; set softwareimage kairos-installer; commit" 2>&1 || true
-cmsh -c "category; use kairos; set installmode SKIP; commit" 2>&1 || true
-cmsh -c "category; use kairos; set newnodeinstallmode SKIP; commit" 2>&1 || true
-cmsh -c "category; use kairos; set installbootrecord no; commit" 2>&1 || true
+cmsh -c "category; use kairos; set installmode AUTO; commit" 2>&1 || true
+cmsh -c "category; use kairos; set newnodeinstallmode FULL; commit" 2>&1 || true
+cmsh -c "category; use kairos; set installbootrecord yes; commit" 2>&1 || true
 echo -e 'category\nuse kairos\nset kernelparameters "console=ttyS0,115200n8 net.ifnames=0 biosdevname=0"\ncommit' | cmsh 2>&1 || true
 cmsh -c "category; use kairos; set initializescript; commit" 2>&1 || true
 cmsh -c "category; use kairos; set finalizescript; commit" 2>&1 || true
