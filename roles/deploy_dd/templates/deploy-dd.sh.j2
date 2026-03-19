@@ -139,7 +139,7 @@ for tmpl in /tftpboot/pxelinux.cfg/template /tftpboot/x86_64/bios/pxelinux.cfg/t
     [ -f "$tmpl" ] && grep -q "IPAPPEND 3" "$tmpl" && sed -i 's/IPAPPEND 3/IPAPPEND 2/g' "$tmpl"
 done
 # Ensure syslinux menu modules are in tftpboot root (PXE config references menu.c32 without path)
-for mod in menu.c32 libutil.c32; do
+for mod in menu.c32 libutil.c32 ldlinux.c32; do
     if [ ! -f "/tftpboot/${mod}" ]; then
         cp "/tftpboot/x86_64/bios/${mod}" "/tftpboot/${mod}" 2>/dev/null || \
         cp "/usr/lib/syslinux/modules/bios/${mod}" "/tftpboot/${mod}" 2>/dev/null || true
