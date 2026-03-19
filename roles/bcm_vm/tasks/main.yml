@@ -76,9 +76,9 @@
     # Since direct kernel boot is still active, the VM re-enters the ramdisk.
     # We detect completion by watching disk writes plateau, then waiting for
     # the write total to stabilize for 2 consecutive checks.
-    - name: Wait for BCM install to complete (watch disk writes, up to 45 min)
+    - name: Wait for BCM install to complete (watch disk writes, up to 4 hours)
       ansible.builtin.shell: |
-        TIMEOUT=2700
+        TIMEOUT=14400
         ELAPSED=0
         PREV_WRITES=0
         STABLE_COUNT=0
@@ -112,7 +112,7 @@
         done
         echo "TIMEOUT after ${TIMEOUT}s"
         exit 1
-      async: 2700
+      async: 14400
       poll: 30
 
     - name: Stop BCM VM after install
