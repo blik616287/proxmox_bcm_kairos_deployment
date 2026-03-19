@@ -1,0 +1,11 @@
+---
+# Install all build dependencies for the E2E pipeline.
+#
+# Usage:
+#   ansible-playbook playbooks/install-dependencies.yml
+#   make install-deps
+- name: Install build dependencies
+  hosts: localhost
+  gather_facts: true
+  roles:
+    - dependencies

@@ -48,8 +48,12 @@ setup: ## Check prerequisites (tools + Ansible collections)
 	done; \
 	$$OK && echo "All prerequisites met." || { echo "Install missing tools."; exit 1; }
 
+.PHONY: install-deps
+install-deps: ## Install all build dependencies (packages, collections, submodules)
+	$(call run-playbook,install-dependencies.yml)
+
 .PHONY: install-collections
-install-collections: ## Install required Ansible collections
+install-collections: ## Install required Ansible collections only
 	ansible-galaxy collection install community.proxmox community.general ansible.posix
 
 # ---------------------------------------------------------------------------

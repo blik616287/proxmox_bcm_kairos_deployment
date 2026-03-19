@@ -1,0 +1,125 @@
+---
+# dependencies — Install all build prerequisites for the E2E pipeline.
+# Runs on localhost. Supports Debian/Ubuntu and Fedora/RHEL.
+
+- name: Gather OS family
+  ansible.builtin.setup:
+    filter: ansible_os_family
+
+# ---- System packages ----
+
+- name: Install packages (Debian/Ubuntu)
+  when: ansible_os_family == "Debian"
+  become: true
+  block:
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Install build dependencies (apt)
+      ansible.builtin.apt:
+        name:
+          # Ansible + SSH
+          - ansible
+          - sshpass
+          # General tools
+          - curl
+          - jq
+          - git
+          # Docker
+          - docker.io
+          # QEMU / KVM
+          - qemu-system-x86
+          - qemu-utils
+          # ISO remastering
+          - xorriso
+          - cpio
+          - gzip
+          - p7zip-full
+          # FAT32 image tools
+          - mtools
+          - dosfstools
+          # Disk image tools
+          - e2fsprogs
+          - util-linux
+          # Netcat (for QEMU serial console)
+          - netcat-openbsd
+        state: present
+
+- name: Install packages (RedHat/Fedora)
+  when: ansible_os_family == "RedHat"
+  become: true
+  block:
+    - name: Install build dependencies (dnf)
+      ansible.builtin.dnf:
+        name:
+          # Ansible + SSH
+          - ansible
+          - sshpass
+          # General tools
+          - curl
+          - jq
+          - git
+          # Docker
+          - docker
+          # QEMU / KVM
+          - qemu-system-x86
+          - qemu-img
+          # ISO remastering
+          - xorriso
+          - cpio
+          - gzip
+          - p7zip
+          # FAT32 image tools
+          - mtools
+          - dosfstools
+          # Disk image tools
+          - e2fsprogs
+          - util-linux
+          # Netcat (for QEMU serial console)
+          - nmap-ncat
+        state: present
+
+# ---- Docker service ----
+
+- name: Enable and start Docker
+  become: true
+  ansible.builtin.systemd:
+    name: docker
+    enabled: true
+    state: started
+
+- name: Add current user to docker group
+  become: true
+  ansible.builtin.user:
+    name: "{{ ansible_user_id }}"
+    groups: docker
+    append: true
+  register: docker_group
+
+- name: Docker group changed notice
+  when: docker_group.changed
+  ansible.builtin.debug:
+    msg: "User '{{ ansible_user_id }}' added to docker group — log out and back in for this to take effect."
+
+# ---- Ansible collections ----
+
+- name: Install required Ansible collections
+  ansible.builtin.command:
+    cmd: ansible-galaxy collection install {{ item }} --upgrade
+  loop:
+    - community.proxmox
+    - community.general
+    - ansible.posix
+  register: galaxy_result
+  changed_when: "'was installed' in galaxy_result.stdout or 'was upgraded' in galaxy_result.stdout"
+
+# ---- CanvOS submodule ----
+
+- name: Initialise CanvOS git submodule
+  ansible.builtin.command:
+    cmd: git submodule update --init --recursive
+    chdir: "{{ e2e_dir }}"
+  register: submodule_result
+  changed_when: submodule_result.stdout | length > 0
