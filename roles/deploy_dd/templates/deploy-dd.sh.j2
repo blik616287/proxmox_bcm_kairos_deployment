@@ -192,6 +192,16 @@ fi
 echo "Generating ramdisk (this takes ~60s)..."
 cmsh -c "softwareimage; use kairos-installer; createramdisk -w" 2>&1
 echo "[OK] Ramdisk regenerated"
+
+# Re-set softwareimage after ramdisk regeneration (cmsh may reject before ramdisk exists)
+cmsh -c "category; use kairos; set softwareimage kairos-installer; commit" 2>&1
+FINAL=$(cmsh -c "category; use kairos; get softwareimage" 2>/dev/null)
+if echo "$FINAL" | grep -q "kairos-installer"; then
+    echo "[OK] Category softwareimage confirmed: kairos-installer"
+else
+    echo "[FAIL] Category softwareimage is still '$FINAL' after ramdisk regeneration"
+    exit 1
+fi
 EOF
 
 info "BCM configured for Kairos deployment"
