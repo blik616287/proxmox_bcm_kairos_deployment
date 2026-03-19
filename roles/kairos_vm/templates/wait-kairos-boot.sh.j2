@@ -1,8 +1,8 @@
 #!/bin/bash
 # Wait for Kairos to fully boot autonomously.
-# The VM goes through: empty disk → PXE fallback → BCM provisions installer →
-# installer boots from disk → dd writes Kairos → sysrq reboot →
-# GRUB-pc boots Kairos from MBR. All in-band, no external intervention.
+# Flow: empty disk → PXE fallback → BCM NFS boot (NOSYNC, no disk rsync) →
+# initialize script runs install-kairos.sh → dd writes Kairos → sysrq reboot →
+# GRUB-pc boots Kairos from MBR.
 set -uo pipefail
 
 BCM_HOST="{{ bcm_vm_ip }}"
@@ -13,19 +13,11 @@ SSH_CMD="sshpass -p ${BCM_PASSWORD} ssh ${SSH_OPTS} root@${BCM_HOST}"
 
 TIMEOUT=1800
 ELAPSED=0
-NOSYNC_SET=false
 
-echo "Waiting for autonomous Kairos boot (PXE → provision → dd → Kairos)..."
+echo "Waiting for autonomous Kairos boot (PXE → NFS boot → dd → Kairos)..."
 
 while [ $ELAPSED -lt $TIMEOUT ]; do
   NODE_STATUS=$(${SSH_CMD} "echo -e 'device\nlist' | cmsh 2>/dev/null | grep -i '${COMPUTE_MAC}'" 2>/dev/null | tr -s ' ')
-
-  # Set NOSYNC as soon as node comes UP (prevents re-provision loop)
-  if echo "$NODE_STATUS" | grep -q "UP" && [ "$NOSYNC_SET" = "false" ]; then
-    ${SSH_CMD} "cmsh -c 'device; use node001; set installmode NOSYNC; commit'" 2>/dev/null || true
-    NOSYNC_SET=true
-    echo "NOSYNC set at ${ELAPSED}s"
-  fi
 
   # Check if Kairos has booted (look for /etc/kairos-release via SSH through BCM)
   KAIROS_IP=$(${SSH_CMD} "arp -an 2>/dev/null | grep -i '${COMPUTE_MAC}' | grep -oP '\d+\.\d+\.\d+\.\d+'" 2>/dev/null || true)
@@ -42,11 +34,11 @@ while [ $ELAPSED -lt $TIMEOUT ]; do
 
   # Log progress
   if echo "$NODE_STATUS" | grep -q "INSTALLING"; then
-    echo "  BCM provisioning... (${ELAPSED}s)"
+    echo "  NFS boot provisioning... (${ELAPSED}s)"
   elif echo "$NODE_STATUS" | grep -q "UP"; then
-    echo "  Node UP, dd running... (${ELAPSED}s, IP: ${KAIROS_IP:-detecting})"
+    echo "  Node UP, initialize/dd running... (${ELAPSED}s, IP: ${KAIROS_IP:-detecting})"
   elif echo "$NODE_STATUS" | grep -q "DOWN\|BOOTING"; then
-    echo "  Node rebooting... (${ELAPSED}s)"
+    echo "  Node booting/rebooting... (${ELAPSED}s)"
   else
     echo "  Waiting for PXE... (${ELAPSED}s)"
   fi
