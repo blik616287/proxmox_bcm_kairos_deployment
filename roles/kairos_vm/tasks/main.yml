@@ -74,12 +74,12 @@
     mode: "0755"
   delegate_to: localhost
 
-- name: Wait for Kairos to fully boot (up to 30 min)
+- name: Wait for Kairos to fully boot (up to 60 min)
   tags: [create]
   ansible.builtin.shell: "{{ build_dir }}/wait-kairos-boot.sh"
   delegate_to: localhost
   register: kairos_boot_result
-  timeout: 1800
+  timeout: 3600
 
 - name: Show Kairos boot result
   tags: [create]

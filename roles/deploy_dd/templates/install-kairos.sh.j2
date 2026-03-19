@@ -15,7 +15,7 @@ done
 echo "[$(date)] Staging binaries to RAM..."
 RAMDIR="/dev/shm/kinstall"
 mkdir -p "$RAMDIR/lib"
-for bin in bash curl gunzip dd sync reboot sleep; do
+for bin in bash curl gunzip dd sync sleep; do
     BIN_PATH=$(which "$bin" 2>/dev/null) && cp "$BIN_PATH" "$RAMDIR/" || true
 done
 for b in "$RAMDIR"/*; do
@@ -24,25 +24,33 @@ for b in "$RAMDIR"/*; do
         [ -f "$l" ] && cp -n "$l" "$RAMDIR/lib/" 2>/dev/null || true
     done || true
 done
+
+# Enable sysrq NOW while system bash still has full access to /proc
+echo 1 > /proc/sys/kernel/sysrq
+
+# Watchdog: background process that reboots after dd finishes
+# Runs in system bash (not staged), sleeps then force-reboots
+(
+    # Wait for dd to finish (run-dd.sh creates a flag file)
+    while [ ! -f /dev/shm/kinstall/.dd-done ]; do sleep 5; done
+    sleep 3
+    sync
+    echo s > /proc/sysrq-trigger 2>/dev/null || true
+    sleep 1
+    echo b > /proc/sysrq-trigger 2>/dev/null || true
+    sleep 3
+    reboot -f 2>/dev/null || true
+) &
+
 cat > "$RAMDIR/run-dd.sh" << DDEOF
 #!/dev/shm/kinstall/bash
 export LD_LIBRARY_PATH="/dev/shm/kinstall/lib"
 echo "[\$(date)] Writing to ${DISK}..."
 /dev/shm/kinstall/curl --fail -s "${RAW_URL}" | /dev/shm/kinstall/gunzip | /dev/shm/kinstall/dd of="${DISK}" bs=16M conv=fsync,sparse 2>&1
 /dev/shm/kinstall/sync
-echo "[\$(date)] Done. Rebooting..."
-/dev/shm/kinstall/sleep 2
-# Enable sysrq and trigger reboot
-echo 1 > /proc/sys/kernel/sysrq 2>/dev/null || true
-echo s > /proc/sysrq-trigger 2>/dev/null || true
-/dev/shm/kinstall/sleep 1
-echo b > /proc/sysrq-trigger 2>/dev/null || true
-# Fallback: force reboot via staged binary
-/dev/shm/kinstall/sleep 3
-/dev/shm/kinstall/reboot -f 2>/dev/null || true
-# Last resort: direct kernel reboot
-echo 1 > /proc/sys/kernel/sysrq 2>/dev/null || true
-echo b > /proc/sysrq-trigger
+echo "[\$(date)] Done. Signaling reboot watchdog..."
+touch /dev/shm/kinstall/.dd-done
+/dev/shm/kinstall/sleep 30
 DDEOF
 chmod +x "$RAMDIR/run-dd.sh"
 echo "[$(date)] Starting dd..."

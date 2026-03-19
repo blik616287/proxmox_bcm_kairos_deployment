@@ -11,7 +11,7 @@ COMPUTE_MAC="{{ kairos_vm_mac }}"
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
 SSH_CMD="sshpass -p ${BCM_PASSWORD} ssh ${SSH_OPTS} root@${BCM_HOST}"
 
-TIMEOUT=1800
+TIMEOUT=3600
 ELAPSED=0
 
 echo "Waiting for autonomous Kairos boot (PXE → NFS boot → dd → Kairos)..."
