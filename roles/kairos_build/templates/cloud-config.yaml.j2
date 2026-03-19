@@ -47,10 +47,10 @@ stages:
           done
           NODE_MAC=$(ip link show ens3 2>/dev/null | awk '/ether/{print $2}')
           export NODE_NAME=$(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-              -o ConnectTimeout=10 -i /var/lib/bcm/bcm-key \
+              -o ConnectTimeout=10 -o LogLevel=ERROR -i /var/lib/bcm/bcm-key \
               root@{{ bcm_internal_ip }} \
               "echo -e 'device\nlist' | cmsh 2>/dev/null | grep -i '${NODE_MAC}' | awk '{print \$2}'" \
-              2>/dev/null)
+              2>/dev/null | grep -oE '^[a-zA-Z0-9_-]+$' | tail -1)
           [ -z "${NODE_NAME}" ] && export NODE_NAME=$(hostname)
           hostnamectl set-hostname "${NODE_NAME}" 2>/dev/null || hostname "${NODE_NAME}" 2>/dev/null || true
           printf '#cloud-config\nstylus:\n  site:\n    name: %s\n' "${NODE_NAME}" > /oem/91_palette_name.yaml
