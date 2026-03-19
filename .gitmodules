@@ -1,3 +1,6 @@
 [submodule "CanvOS"]
 	path = CanvOS
 	url = https://github.com/spectrocloud/CanvOS.git
+[submodule "proxmox"]
+	path = proxmox
+	url = https://github.com/blik616287/proxmox-testbed
