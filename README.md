@@ -17,46 +17,70 @@ Automated end-to-end pipeline that stands up a Proxmox VE environment, deploys a
 
 ## Quick Start — Full E2E Deployment
 
-### 1. Install system dependencies
-
-**Debian / Ubuntu:**
-```bash
-sudo apt update
-sudo apt install -y ansible sshpass curl jq docker.io qemu-system-x86 \
-    xorriso cpio gzip mtools dosfstools p7zip-full
-```
-
-**Fedora / RHEL:**
-```bash
-sudo dnf install -y ansible sshpass curl jq docker qemu-system-x86 \
-    xorriso cpio gzip mtools dosfstools p7zip
-```
-
-Ensure Docker is running:
-```bash
-sudo systemctl enable --now docker
-sudo usermod -aG docker $USER   # log out/in after this
-```
-
-### 2. Clone the repo and initialise submodules
+### 1. Clone the repo
 
 ```bash
 git clone <repo-url> pbk
 cd pbk
-git submodule update --init --recursive
 ```
 
-The `CanvOS/` submodule (from `spectrocloud/CanvOS`) is required by Stage 4 (Kairos build). If you skip this step the playbook will clone it automatically, but having it checked out up front avoids surprises.
+### 2. Install all dependencies
 
-### 3. Install Ansible collections
+A single command installs system packages, Ansible collections, enables Docker, and initialises the CanvOS git submodule:
 
 ```bash
-make install-collections
+make install-deps
 ```
 
-This installs `community.proxmox`, `community.general`, and `ansible.posix`.
+This runs the `install-dependencies.yml` playbook which handles Debian/Ubuntu and Fedora/RHEL automatically. It installs:
 
-### 4. Verify all prerequisites
+| Category | Packages |
+|----------|----------|
+| Ansible + SSH | `ansible`, `sshpass` |
+| General tools | `curl`, `jq`, `git` |
+| Docker | `docker.io` (Debian) / `docker` (Fedora) |
+| QEMU / KVM | `qemu-system-x86`, `qemu-utils` |
+| ISO remastering | `xorriso`, `cpio`, `gzip`, `p7zip-full` |
+| FAT32 image tools | `mtools`, `dosfstools` |
+| Disk image tools | `e2fsprogs`, `util-linux` |
+| Netcat | `netcat-openbsd` (Debian) / `nmap-ncat` (Fedora) |
+| Ansible collections | `community.proxmox`, `community.general`, `ansible.posix` |
+| Git submodule | `CanvOS/` (spectrocloud/CanvOS) |
+
+> After install, log out and back in if you were added to the `docker` group for the first time.
+
+Or install manually if you prefer:
+
+<details>
+<summary>Manual install (Debian/Ubuntu)</summary>
+
+```bash
+sudo apt update
+sudo apt install -y ansible sshpass curl jq git docker.io qemu-system-x86 \
+    qemu-utils xorriso cpio gzip p7zip-full mtools dosfstools e2fsprogs \
+    util-linux netcat-openbsd
+sudo systemctl enable --now docker
+sudo usermod -aG docker $USER
+make install-collections
+git submodule update --init --recursive
+```
+</details>
+
+<details>
+<summary>Manual install (Fedora/RHEL)</summary>
+
+```bash
+sudo dnf install -y ansible sshpass curl jq git docker qemu-system-x86 \
+    qemu-img xorriso cpio gzip p7zip mtools dosfstools e2fsprogs \
+    util-linux nmap-ncat
+sudo systemctl enable --now docker
+sudo usermod -aG docker $USER
+make install-collections
+git submodule update --init --recursive
+```
+</details>
+
+### 3. Verify all prerequisites
 
 ```bash
 make setup
@@ -64,11 +88,9 @@ make setup
 
 Every tool and collection should show `[OK]`. Fix any `[MISSING]` items before proceeding.
 
-### 5. Configure your environment
+### 4. Configure your environment
 
-Copy the example and fill in your values:
 ```bash
-cp inventory/group_vars/all.yml.example inventory/group_vars/all.yml   # if an example exists
 vi inventory/group_vars/all.yml
 ```
 
@@ -79,7 +101,7 @@ At a minimum you need to set:
 
 If `proxmox_api_host` points to an existing Proxmox server, Stage 0 is automatically skipped. Otherwise the pipeline will stand up a local Proxmox testbed VM via libvirt.
 
-### 6. Run the full pipeline
+### 5. Run the full pipeline
 
 ```bash
 make orchestrate
@@ -95,7 +117,7 @@ make kairos-build       # just Stage 4
 
 Monitor progress in real-time — output is displayed on screen and logged to `logs/`.
 
-### 7. Validate
+### 6. Validate
 
 ```bash
 make validate
@@ -103,7 +125,7 @@ make validate
 
 Runs an 18-point check against the deployed Kairos node through the BCM jump host.
 
-### 8. Tear down
+### 7. Tear down
 
 ```bash
 make teardown      # Destroy VMs, remove ISOs, tear down vmbr1
@@ -182,6 +204,7 @@ make proxmox-up ANSIBLE_ARGS="-e proxmox_api_host=10.0.0.5"  # override a variab
 │   └── group_vars/all.yml            # All configuration variables
 ├── playbooks/
 │   ├── site.yml                      # Full pipeline (imports all stages)
+│   ├── install-dependencies.yml      # Install all build prerequisites
 │   ├── 00-proxmox-up.yml             # Stage 0
 │   ├── 01-create-internal-network.yml# Stage 1
 │   ├── 02-bcm-prepare.yml            # Stage 2
@@ -192,6 +215,7 @@ make proxmox-up ANSIBLE_ARGS="-e proxmox_api_host=10.0.0.5"  # override a variab
 │   ├── 07-validate.yml               # Stage 7
 │   └── teardown.yml                  # Destroy everything
 ├── roles/
+│   ├── dependencies/                 # Install system packages + collections
 │   ├── bcm_prepare/                  # ISO download, rootfs patch, remaster
 │   ├── bcm_vm/                       # BCM VM create, install, IP discovery
 │   ├── kairos_build/                 # CanvOS build, QEMU disk image
