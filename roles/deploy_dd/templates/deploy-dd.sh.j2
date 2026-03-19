@@ -105,22 +105,31 @@ cmsh -c "softwareimage; list" 2>/dev/null | grep -q kairos-installer || \
 echo "[OK] kairos-installer image ready"
 EOF
 
-# 4. Install dd script + initialize script via /cm/shared (NFS-mounted on all nodes)
-info "[4/7] Installing dd service..."
-${SSH_CMD} "mkdir -p /cm/shared/kairos"
-${SCP_CMD} "${BUILD_DIR}/install-kairos.sh" root@${BCM_HOST}:/cm/shared/kairos/install-kairos.sh
-${SSH_CMD} "chmod +x /cm/shared/kairos/install-kairos.sh"
+# 4. Install dd script + service into node-installer (NFS root for PXE-booted nodes)
+info "[4/7] Installing dd service into node-installer..."
+${SSH_CMD} "mkdir -p /cm/shared/kairos /cm/node-installer/usr/local/sbin /cm/node-installer/etc/systemd/system"
+${SCP_CMD} "${BUILD_DIR}/install-kairos.sh" root@${BCM_HOST}:/cm/node-installer/usr/local/sbin/install-kairos.sh
+${SSH_CMD} "chmod +x /cm/node-installer/usr/local/sbin/install-kairos.sh"
 
-# Initialize script: runs on the node AFTER it is fully booted (NFS available)
-# This triggers the dd install of Kairos
 ${SSH_CMD} << 'EOF' | filter_motd
-cat > /cm/shared/kairos/initialize.sh << 'INIT'
-#!/bin/bash
-# Run the Kairos dd installer directly — node is NFS-booted, /cm/shared is mounted
-exec /cm/shared/kairos/install-kairos.sh
-INIT
-chmod +x /cm/shared/kairos/initialize.sh
-echo "[OK] Install script + initialize in /cm/shared/kairos/"
+cat > /cm/node-installer/etc/systemd/system/kairos-install.service << 'SERVICE'
+[Unit]
+Description=Install Kairos Raw Disk Image
+After=network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStartPre=/bin/bash -c 'sleep 10'
+ExecStart=/usr/local/sbin/install-kairos.sh
+TimeoutStartSec=1800
+StandardOutput=journal+console
+StandardError=journal+console
+[Install]
+WantedBy=multi-user.target
+SERVICE
+mkdir -p /cm/node-installer/etc/systemd/system/multi-user.target.wants
+ln -sf /etc/systemd/system/kairos-install.service /cm/node-installer/etc/systemd/system/multi-user.target.wants/kairos-install.service
+echo "[OK] Install script + service in /cm/node-installer/"
 EOF
 
 # 5. PXE template + syslinux modules
@@ -152,7 +161,7 @@ cmsh -c "category; use kairos; set softwareimage kairos-installer; commit" 2>&1 
 cmsh -c "category; use kairos; set installmode NOSYNC; commit" 2>&1 || true
 cmsh -c "category; use kairos; set newnodeinstallmode NOSYNC; commit" 2>&1 || true
 cmsh -c "category; use kairos; set kernelparameters console=ttyS0,115200n8; commit" 2>&1 || true
-cmsh -c "category; use kairos; set initializescript /cm/shared/kairos/initialize.sh; commit" 2>&1 || true
+cmsh -c "category; use kairos; set initializescript; commit" 2>&1 || true
 cmsh -c "category; use kairos; set finalizescript; commit" 2>&1 || true
 cmsh -c "category; use kairos; monitoring; setup; healthconf; use interfaces; set disabled yes; commit" 2>&1 || true
 cmsh -c "category; use kairos; monitoring; setup; healthconf; use mounts; set disabled yes; commit" 2>&1 || true
@@ -166,16 +175,20 @@ ${SSH_CMD} "cmsh -c 'device; use node001; set mac ${COMPUTE_MAC}; set category k
 # 7. Verify and regenerate ramdisk
 info "[7/7] Verifying setup + generating ramdisk..."
 ${SSH_CMD} << 'EOF' | filter_motd
-# Verify install script in /cm/shared
-if [ ! -x /cm/shared/kairos/install-kairos.sh ]; then
-    echo "[FAIL] install-kairos.sh missing from /cm/shared/kairos/"
+# Verify install script and service in node-installer
+if [ ! -x /cm/node-installer/usr/local/sbin/install-kairos.sh ]; then
+    echo "[FAIL] install-kairos.sh missing from /cm/node-installer/"
     exit 1
 fi
-if [ ! -x /cm/shared/kairos/initialize.sh ]; then
-    echo "[FAIL] initialize.sh missing from /cm/shared/kairos/"
+if [ ! -f /cm/node-installer/etc/systemd/system/kairos-install.service ]; then
+    echo "[FAIL] kairos-install.service missing from /cm/node-installer/"
     exit 1
 fi
-echo "[OK] Install files verified in /cm/shared/kairos/"
+if [ ! -L /cm/node-installer/etc/systemd/system/multi-user.target.wants/kairos-install.service ]; then
+    echo "[FAIL] kairos-install.service not enabled in node-installer"
+    exit 1
+fi
+echo "[OK] Install files verified in /cm/node-installer/"
 
 # Verify disk image is served
 curl --fail --silent --head http://localhost:8888/disk.raw.gz >/dev/null 2>&1 && echo "[OK] Disk image served via HTTP" || { echo "[FAIL] HTTP server not serving disk image"; exit 1; }
