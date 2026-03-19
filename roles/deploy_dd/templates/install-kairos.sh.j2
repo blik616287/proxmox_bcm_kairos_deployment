@@ -28,7 +28,7 @@ cat > "$RAMDIR/run-dd.sh" << DDEOF
 #!/dev/shm/kinstall/bash
 export LD_LIBRARY_PATH="/dev/shm/kinstall/lib"
 echo "[\$(date)] Writing to ${DISK}..."
-/dev/shm/kinstall/curl --fail -s "${RAW_URL}" | /dev/shm/kinstall/gunzip | /dev/shm/kinstall/dd of="${DISK}" bs=16M conv=fsync 2>&1
+/dev/shm/kinstall/curl --fail -s "${RAW_URL}" | /dev/shm/kinstall/gunzip | /dev/shm/kinstall/dd of="${DISK}" bs=16M conv=fsync,sparse 2>&1
 /dev/shm/kinstall/sync
 echo "[\$(date)] Done. Rebooting..."
 /dev/shm/kinstall/sleep 2
