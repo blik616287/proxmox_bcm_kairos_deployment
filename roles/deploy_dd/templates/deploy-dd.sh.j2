@@ -73,9 +73,9 @@ step "Deploying Kairos via dd Installer"
 # 1. Upload raw image
 info "[1/7] Compressing and uploading..."
 ${SSH_CMD} "mkdir -p /cm/shared/kairos" | filter_motd
-COMPRESSED="${RAW_IMAGE}.gz"
-[ ! -f "$COMPRESSED" ] || [ "$RAW_IMAGE" -nt "$COMPRESSED" ] && gzip -c "$RAW_IMAGE" > "$COMPRESSED"
-${SCP_CMD} "${COMPRESSED}" root@${BCM_HOST}:/cm/shared/kairos/disk.raw.gz
+COMPRESSED="${RAW_IMAGE}.lz4"
+[ ! -f "$COMPRESSED" ] || [ "$RAW_IMAGE" -nt "$COMPRESSED" ] && lz4 -f "$RAW_IMAGE" "$COMPRESSED"
+${SCP_CMD} "${COMPRESSED}" root@${BCM_HOST}:/cm/shared/kairos/disk.raw.lz4
 
 # 2. HTTP server
 info "[2/7] HTTP server..."
@@ -95,7 +95,7 @@ SVC
 systemctl daemon-reload
 systemctl enable --now kairos-http
 sleep 2
-curl --fail --silent --head http://localhost:8888/disk.raw.gz >/dev/null 2>&1 && echo "[OK]" || { echo "[FAIL]"; exit 1; }
+curl --fail --silent --head http://localhost:8888/disk.raw.lz4 >/dev/null 2>&1 && echo "[OK]" || { echo "[FAIL]"; exit 1; }
 EOF
 
 # 3. Installer image
@@ -111,6 +111,8 @@ EOF
 
 # 4. Install dd script + service into the software image
 info "[4/7] Installing dd service into kairos-installer image..."
+# Ensure lz4 is available in the image for decompression
+${SSH_CMD} "chroot /cm/images/kairos-installer apt-get install -y -qq lz4 >/dev/null 2>&1 || true" 2>/dev/null
 ${SCP_CMD} "${BUILD_DIR}/install-kairos.sh" root@${BCM_HOST}:/cm/images/kairos-installer/usr/local/sbin/install-kairos.sh
 ${SSH_CMD} "chmod +x /cm/images/kairos-installer/usr/local/sbin/install-kairos.sh"
 

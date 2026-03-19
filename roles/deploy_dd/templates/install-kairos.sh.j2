@@ -3,7 +3,7 @@ set -euo pipefail
 LOG="/dev/shm/kairos-install.log"
 exec > >(tee -a "$LOG") 2>&1
 HEAD_IP="{{ bcm_internal_ip }}"
-RAW_URL="http://${HEAD_IP}:8888/disk.raw.gz"
+RAW_URL="http://${HEAD_IP}:8888/disk.raw.lz4"
 DISK=$(lsblk -ndo NAME,TYPE | awk '$2=="disk" && $1!~/^fd[0-9]/{print "/dev/"$1; exit}')
 echo "[$(date)] Kairos Raw Image Installer"
 echo "[$(date)] URL: ${RAW_URL}  Target: ${DISK:-NOT FOUND}"
@@ -15,7 +15,7 @@ done
 echo "[$(date)] Staging binaries to RAM..."
 RAMDIR="/dev/shm/kinstall"
 mkdir -p "$RAMDIR/lib"
-for bin in bash curl gunzip dd sync sleep; do
+for bin in bash curl lz4 dd sync sleep; do
     BIN_PATH=$(which "$bin" 2>/dev/null) && cp "$BIN_PATH" "$RAMDIR/" || true
 done
 for b in "$RAMDIR"/*; do
@@ -32,7 +32,7 @@ cat > "$RAMDIR/run-dd.sh" << DDEOF
 #!/dev/shm/kinstall/bash
 export LD_LIBRARY_PATH="/dev/shm/kinstall/lib"
 echo "[\$(date)] Writing to ${DISK}..."
-/dev/shm/kinstall/curl --fail -s "${RAW_URL}" | /dev/shm/kinstall/gunzip | /dev/shm/kinstall/dd of="${DISK}" bs=16M conv=fsync,sparse 2>&1
+/dev/shm/kinstall/curl --fail -s "${RAW_URL}" | /dev/shm/kinstall/lz4 -d - - | /dev/shm/kinstall/dd of="${DISK}" bs=16M conv=fsync,sparse 2>&1
 /dev/shm/kinstall/sync
 echo "[\$(date)] Write complete. Rebooting into Kairos..."
 /dev/shm/kinstall/sleep 2
