@@ -161,7 +161,7 @@ cmsh -c "category; use kairos; set softwareimage kairos-installer; commit" 2>&1 
 cmsh -c "category; use kairos; set installmode SKIP; commit" 2>&1 || true
 cmsh -c "category; use kairos; set newnodeinstallmode SKIP; commit" 2>&1 || true
 cmsh -c "category; use kairos; set installbootrecord no; commit" 2>&1 || true
-cmsh -c "category; use kairos; set kernelparameters console=ttyS0,115200n8; commit" 2>&1 || true
+echo -e 'category\nuse kairos\nset kernelparameters "console=ttyS0,115200n8 net.ifnames=0 biosdevname=0"\ncommit' | cmsh 2>&1 || true
 cmsh -c "category; use kairos; set initializescript; commit" 2>&1 || true
 cmsh -c "category; use kairos; set finalizescript; commit" 2>&1 || true
 cmsh -c "category; use kairos; monitoring; setup; healthconf; use interfaces; set disabled yes; commit" 2>&1 || true
@@ -176,6 +176,10 @@ VERIFY_IMG=$(cmsh -c "category; use kairos; get softwareimage" 2>/dev/null)
 echo "Category verify: installmode=${VERIFY_MODE} softwareimage=${VERIFY_IMG}"
 echo "$VERIFY_MODE" | grep -qi "SKIP" || { echo "[FAIL] Category installmode is not SKIP"; exit 1; }
 echo "$VERIFY_IMG" | grep -q "kairos-installer" || { echo "[FAIL] Category softwareimage is not kairos-installer"; exit 1; }
+
+# Pre-register compute node MAC so BCM doesn't need interactive confirmation or reboot cycle
+echo -e "device\nadd physicalnode node001 10.141.0.1 eth0\nset category kairos\nset mac ${COMPUTE_MAC}\ncommit" | cmsh 2>&1 || true
+echo "[OK] node001 registered (MAC ${COMPUTE_MAC}, category kairos, installmode inherited from category)"
 EOF
 
 # 7. Verify and regenerate ramdisk
