@@ -134,11 +134,18 @@ chroot "${IMAGE_ROOT}" systemctl enable kairos-install.service 2>&1 || {
 }
 EOF
 
-# 5. PXE template
+# 5. PXE template + syslinux modules
 info "[5/7] PXE template..."
 ${SSH_CMD} << 'EOF' | filter_motd
 for tmpl in /tftpboot/pxelinux.cfg/template /tftpboot/x86_64/bios/pxelinux.cfg/template; do
     [ -f "$tmpl" ] && grep -q "IPAPPEND 3" "$tmpl" && sed -i 's/IPAPPEND 3/IPAPPEND 2/g' "$tmpl"
+done
+# Ensure syslinux menu modules are in tftpboot root (PXE config references menu.c32 without path)
+for mod in menu.c32 libutil.c32; do
+    if [ ! -f "/tftpboot/${mod}" ]; then
+        cp "/tftpboot/x86_64/bios/${mod}" "/tftpboot/${mod}" 2>/dev/null || \
+        cp "/usr/lib/syslinux/modules/bios/${mod}" "/tftpboot/${mod}" 2>/dev/null || true
+    fi
 done
 EOF
 
