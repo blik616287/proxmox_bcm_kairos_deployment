@@ -184,12 +184,14 @@ cmsh -c "category; use kairos; monitoring; setup; healthconf; use ntp; set disab
 cmsh -c "partition; use base; set defaultcategory kairos; commit" 2>&1 || true
 cmsh -c "partition; use base; set nodebasename node; set nodedigits 3; commit" 2>&1 || true
 
-# Register node: set MAC and category on node001 (use if exists from cmfirstboot, add if missing)
-if cmsh -c "device; use node001" 2>/dev/null; then
-    echo -e "device\nuse node001\nset mac ${COMPUTE_MAC}\nset category kairos\ncommit" | cmsh 2>&1
-else
-    echo -e "device\nadd physicalnode node001 10.141.0.1 eth0\nset category kairos\nset mac ${COMPUTE_MAC}\ncommit" | cmsh 2>&1
-fi
+EOF
+
+# Register node: set MAC and category on node001 (outside heredoc so COMPUTE_MAC expands)
+${SSH_CMD} "cmsh -c 'device; use node001' 2>/dev/null && \
+    echo -e 'device\nuse node001\nset mac ${COMPUTE_MAC}\nset category kairos\ncommit' | cmsh 2>&1 || \
+    echo -e 'device\nadd physicalnode node001 10.141.0.1 eth0\nset category kairos\nset mac ${COMPUTE_MAC}\ncommit' | cmsh 2>&1" 2>/dev/null | filter_motd
+
+${SSH_CMD} << 'EOF' | filter_motd
 
 # Verify
 VERIFY_IMG=$(cmsh -c "category; use kairos; get softwareimage" 2>/dev/null)
