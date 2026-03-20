@@ -26,3 +26,5 @@ CanvOS/
 # Temp work directories
 .bcm-work.*
 .bcm-prep.*
+
+proxmox.api.token
