@@ -112,7 +112,8 @@ EOF
 # 4. Install dd script + service into the software image
 info "[4/7] Installing dd service into kairos-installer image..."
 # Ensure lz4 is available in the image for decompression
-${SSH_CMD} "chroot /cm/images/kairos-installer apt-get install -y -qq lz4 >/dev/null 2>&1 || true" 2>/dev/null
+${SSH_CMD} "DEBIAN_FRONTEND=noninteractive chroot /cm/images/kairos-installer bash -c 'apt-get update -qq >/dev/null 2>&1; apt-get install -y -qq lz4 2>&1'" 2>/dev/null | filter_motd
+${SSH_CMD} "chroot /cm/images/kairos-installer which lz4 >/dev/null 2>&1" || { err "lz4 not installed in kairos-installer image"; exit 1; }
 ${SCP_CMD} "${BUILD_DIR}/install-kairos.sh" root@${BCM_HOST}:/cm/images/kairos-installer/usr/local/sbin/install-kairos.sh
 ${SSH_CMD} "chmod +x /cm/images/kairos-installer/usr/local/sbin/install-kairos.sh"
 
