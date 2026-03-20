@@ -64,9 +64,12 @@ fi
 PUBKEY=$(cat "${BCM_KEY}.pub")
 ${SSH_CMD} "grep -qF '${PUBKEY}' /root/.ssh/authorized_keys 2>/dev/null || echo '${PUBKEY}' >> /root/.ssh/authorized_keys" 2>/dev/null || true
 
-# NFS exports
-${SSH_CMD} "exportfs -v 2>/dev/null | grep -q '/cm/images/default-image' || exportfs -o ro,no_subtree_check,no_root_squash,async 10.141.0.0/16:/cm/images/default-image" 2>/dev/null || true
-${SSH_CMD} "exportfs -v 2>/dev/null | grep -q '/cm/shared' || exportfs -o rw,no_subtree_check,no_root_squash,async 10.141.0.0/16:/cm/shared" 2>/dev/null || true
+# NFS exports (persistent via /etc/exports)
+${SSH_CMD} << 'EOF' | filter_motd
+grep -q 'default-image.*10.0.0.0' /etc/exports 2>/dev/null || echo '/cm/images/default-image 10.0.0.0/8(ro,no_subtree_check,no_root_squash,async)' >> /etc/exports
+grep -q '/cm/shared.*10.0.0.0' /etc/exports 2>/dev/null || echo '/cm/shared 10.0.0.0/8(rw,no_subtree_check,no_root_squash,async)' >> /etc/exports
+exportfs -ra
+EOF
 
 step "Deploying Kairos via dd Installer"
 
@@ -148,7 +151,7 @@ ${SSH_CMD} << 'EOF' | filter_motd
 for tmpl in /tftpboot/pxelinux.cfg/template /tftpboot/x86_64/bios/pxelinux.cfg/template; do
     [ -f "$tmpl" ] && grep -q "IPAPPEND 3" "$tmpl" && sed -i 's/IPAPPEND 3/IPAPPEND 2/g' "$tmpl"
 done
-for mod in menu.c32 libutil.c32 ldlinux.c32; do
+for mod in menu.c32 libutil.c32 ldlinux.c32 libcom32.c32; do
     if [ ! -f "/tftpboot/${mod}" ]; then
         cp "/tftpboot/x86_64/bios/${mod}" "/tftpboot/${mod}" 2>/dev/null || \
         cp "/usr/lib/syslinux/modules/bios/${mod}" "/tftpboot/${mod}" 2>/dev/null || true

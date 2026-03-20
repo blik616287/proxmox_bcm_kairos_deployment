@@ -1,0 +1,57 @@
+---
+# vxlan_tunnel — Creates a VXLAN tunnel between the build host and Proxmox's vmbr1
+# so local QEMU VMs can PXE boot from BCM.
+#
+# Result: br-bcm bridge on localhost connected to BCM's internal network via VXLAN.
+
+- name: Set transport MTU on virbr-pve for VXLAN overhead
+  ansible.builtin.shell: |
+    ip link set virbr-pve mtu 9000 2>/dev/null || true
+    # Find the vnet interface for Proxmox VM and set its MTU too
+    for vnet in $(ip link show | grep vnet | awk -F: '{print $2}' | tr -d ' '); do
+      ip link set "$vnet" mtu 9000 2>/dev/null || true
+    done
+  changed_when: false
+
+- name: Set transport MTU on Proxmox side
+  ansible.builtin.shell: |
+    ip link set enp1s0 mtu 9000 2>/dev/null || true
+    ip link set vmbr0 mtu 9000 2>/dev/null || true
+  delegate_to: proxmox-ve
+  changed_when: false
+
+- name: Create VXLAN tunnel on Proxmox (bridged to vmbr1)
+  ansible.builtin.shell: |
+    ip link del vxlan100 2>/dev/null || true
+    ip link add vxlan100 type vxlan id 100 remote {{ libvirt_net_gateway }} dstport 4789 dev enp1s0
+    ip link set vxlan100 mtu 1500
+    ip link set vxlan100 up
+    brctl addif vmbr1 vxlan100
+    echo "VXLAN tunnel created on Proxmox"
+  delegate_to: proxmox-ve
+  changed_when: true
+
+- name: Create VXLAN tunnel on build host
+  ansible.builtin.shell: |
+    ip link del vxlan100 2>/dev/null || true
+    ip link del br-bcm 2>/dev/null || true
+    ip link add vxlan100 type vxlan id 100 remote {{ proxmox_vm_ip }} dstport 4789 dev virbr-pve
+    ip link set vxlan100 mtu 1500
+    ip link set vxlan100 up
+    brctl addbr br-bcm 2>/dev/null || true
+    brctl addif br-bcm vxlan100
+    ip link set br-bcm up
+    echo "VXLAN tunnel + bridge created on build host"
+  changed_when: true
+
+- name: Verify VXLAN connectivity to BCM
+  ansible.builtin.shell: |
+    ip addr add 10.141.0.99/16 dev br-bcm 2>/dev/null || true
+    ping -c1 -W3 {{ bcm_internal_ip }} >/dev/null 2>&1 && echo "BCM reachable via VXLAN" || { echo "BCM NOT reachable"; exit 1; }
+    ip addr del 10.141.0.99/16 dev br-bcm 2>/dev/null || true
+  register: vxlan_test
+  changed_when: false
+
+- name: Show VXLAN status
+  ansible.builtin.debug:
+    msg: "{{ vxlan_test.stdout }}"

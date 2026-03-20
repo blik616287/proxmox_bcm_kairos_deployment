@@ -45,7 +45,7 @@ stages:
             ping -c1 -W2 {{ bcm_internal_ip }} >/dev/null 2>&1 && break
             sleep 2
           done
-          NODE_MAC=$(ip link show ens3 2>/dev/null | awk '/ether/{print $2}')
+          NODE_MAC=$(ip route get 1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}' | xargs -I{} ip link show {} 2>/dev/null | awk '/ether/{print $2}')
           export NODE_NAME=$(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               -o ConnectTimeout=10 -o LogLevel=ERROR -i /var/lib/bcm/bcm-key \
               root@{{ bcm_internal_ip }} \
@@ -69,11 +69,15 @@ stages:
               "echo -e 'device\nuse ${NODE_NAME}\nset installmode NOSYNC\ncommit' | cmsh" \
               >/dev/null 2>&1 || true
           mkdir -p /var/lib/cm/rootfs
-          mount -t nfs -o ro,nolock,vers=3 {{ bcm_internal_ip }}:/cm/images/default-image /var/lib/cm/rootfs 2>/dev/null || exit 0
+          for attempt in $(seq 1 60); do
+            mount -t nfs -o ro,nolock,vers=3 {{ bcm_internal_ip }}:/cm/images/default-image /var/lib/cm/rootfs 2>/dev/null && break
+            sleep 10
+          done
+          mountpoint -q /var/lib/cm/rootfs || exit 0
           mkdir -p /var/lib/cm/cmd-etc
           cp -a /var/lib/cm/rootfs/cm/local/apps/cmd/etc/. /var/lib/cm/cmd-etc/ 2>/dev/null || true
           sed -i "s/Master = master/Master = {{ bcm_internal_ip }}/" /var/lib/cm/cmd-etc/cmd.conf
-          NODE_MAC=$(ip link show ens3 2>/dev/null | awk '/ether/{print $2}' | tr ':' '-')
+          NODE_MAC=$(ip route get 1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}' | xargs -I{} ip link show {} 2>/dev/null | awk '/ether/{print $2}' | tr ':' '-')
           scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               -i /var/lib/bcm/bcm-key \
               root@{{ bcm_internal_ip }}:/cm/node-installer/certificates/${NODE_MAC}/cert \

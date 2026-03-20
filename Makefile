@@ -97,6 +97,26 @@ validate: ## Stage 7: Run validation checks on Kairos node
 	$(call run-playbook,07-validate.yml)
 
 # ---------------------------------------------------------------------------
+# Local testing (QEMU on build host via VXLAN tunnel)
+# ---------------------------------------------------------------------------
+
+.PHONY: kairos-local
+kairos-local: ## Launch local QEMU VM that PXE boots from BCM (via VXLAN tunnel)
+	$(call run-playbook,kairos-local.yml)
+
+.PHONY: kairos-local-kill
+kairos-local-kill: ## Kill the local QEMU VM
+	@if [ -f build/.kairos-local-qemu.pid ]; then \
+		PID=$$(cat build/.kairos-local-qemu.pid); \
+		kill $$PID 2>/dev/null && echo "Killed QEMU PID $$PID" || echo "QEMU not running"; \
+		rm -f build/.kairos-local-qemu.pid; \
+	else echo "No PID file found"; fi
+
+.PHONY: kairos-local-serial
+kairos-local-serial: ## Tail the local QEMU serial log
+	@tail -f logs/kairos-local-serial.log
+
+# ---------------------------------------------------------------------------
 # Teardown & cleanup
 # ---------------------------------------------------------------------------
 

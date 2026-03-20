@@ -1,0 +1,72 @@
+#!/bin/bash
+# launch-local-qemu.sh — Launches a local QEMU VM that PXE boots from BCM via VXLAN tunnel.
+# Provides serial log and VGA-less output for debugging.
+set -euo pipefail
+
+BUILD_DIR="{{ build_dir }}"
+COMPUTE_MAC="{{ kairos_vm_mac }}"
+COMPUTE_DISK="${BUILD_DIR}/compute-node-disk.qcow2"
+SERIAL_LOG="{{ e2e_dir }}/logs/kairos-local-serial.log"
+PIDFILE="${BUILD_DIR}/.kairos-local-qemu.pid"
+MONITOR_SOCK="/tmp/qemu-kairos-monitor.sock"
+
+# Cleanup any previous run
+if [ -f "$PIDFILE" ]; then
+    OLD_PID=$(cat "$PIDFILE")
+    if kill -0 "$OLD_PID" 2>/dev/null; then
+        echo "Killing previous QEMU (PID $OLD_PID)..."
+        kill "$OLD_PID" 2>/dev/null || true
+        sleep 2
+    fi
+    rm -f "$PIDFILE"
+fi
+rm -f "$MONITOR_SOCK"
+
+# Create fresh disk
+rm -f "$COMPUTE_DISK"
+qemu-img create -f qcow2 "$COMPUTE_DISK" {{ kairos_vm_disk_size }}
+
+# Ensure tap interface exists on br-bcm
+ip link del tap-kairos 2>/dev/null || true
+ip tuntap add dev tap-kairos mode tap
+ip link set tap-kairos mtu 1500
+ip link set tap-kairos up
+brctl addif br-bcm tap-kairos
+
+# Clear serial log
+mkdir -p "$(dirname "$SERIAL_LOG")"
+: > "$SERIAL_LOG"
+chmod 666 "$SERIAL_LOG"
+
+echo "============================================"
+echo " Local Kairos Compute Node (QEMU)"
+echo "============================================"
+echo " Disk:   $COMPUTE_DISK"
+echo " MAC:    $COMPUTE_MAC"
+echo " Serial: $SERIAL_LOG"
+echo " Boot:   disk first, PXE fallback"
+echo "============================================"
+
+qemu-system-x86_64 \
+    -enable-kvm \
+    -m {{ kairos_vm_memory }} \
+    -smp {{ kairos_vm_cores }} \
+    -cpu host \
+    -netdev tap,id=net0,ifname=tap-kairos,script=no,downscript=no \
+    -device virtio-net-pci,netdev=net0,mac=${COMPUTE_MAC} \
+    -drive file="${COMPUTE_DISK}",format=qcow2,if=virtio \
+    -boot order=cn \
+    -vga none \
+    -display none \
+    -chardev file,id=serial0,path="${SERIAL_LOG}" \
+    -serial chardev:serial0 \
+    -monitor unix:${MONITOR_SOCK},server,nowait \
+    -daemonize \
+    -pidfile "$PIDFILE"
+
+QEMU_PID=$(cat "$PIDFILE")
+echo "QEMU started (PID ${QEMU_PID})"
+echo ""
+echo "Monitor: echo 'info status' | socat - UNIX-CONNECT:${MONITOR_SOCK}"
+echo "Serial:  tail -f ${SERIAL_LOG}"
+echo "Kill:    kill ${QEMU_PID}"

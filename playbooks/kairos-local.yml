@@ -1,0 +1,51 @@
+---
+# kairos-local.yml — Set up VXLAN tunnel and launch a local QEMU VM
+# that PXE boots from BCM. For testing without Proxmox VM management.
+#
+# Usage: make kairos-local
+
+- name: Set up VXLAN tunnel to BCM
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Set up VXLAN tunnel
+      ansible.builtin.include_role:
+        name: vxlan_tunnel
+
+- name: Launch local QEMU compute node
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Read BCM VM IP
+      ansible.builtin.slurp:
+        src: "{{ build_dir }}/.bcm-ip"
+      register: bcm_ip_file
+
+    - name: Set BCM IP fact
+      ansible.builtin.set_fact:
+        bcm_vm_ip: "{{ bcm_ip_file.content | b64decode | trim }}"
+
+    - name: Render local QEMU launch script
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../roles/kairos_vm/templates/launch-local-qemu.sh.j2"
+        dest: "{{ build_dir }}/launch-local-qemu.sh"
+        mode: "0755"
+
+    - name: Launch local QEMU VM
+      ansible.builtin.shell: "{{ build_dir }}/launch-local-qemu.sh"
+      become: true
+
+    - name: Render Kairos boot wait script
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../roles/kairos_vm/templates/wait-kairos-boot.sh.j2"
+        dest: "{{ build_dir }}/wait-kairos-boot.sh"
+        mode: "0755"
+
+    - name: Wait for Kairos to fully boot (up to 60 min)
+      ansible.builtin.shell: "{{ build_dir }}/wait-kairos-boot.sh"
+      register: kairos_boot_result
+      timeout: 3600
+
+    - name: Show Kairos boot result
+      ansible.builtin.debug:
+        msg: "{{ kairos_boot_result.stdout_lines | default(['unknown']) | last }}"
