@@ -1,0 +1,10 @@
+---
+# Stage 3 (API variant): Deploy BCM head node via Proxmox API.
+# Use this when SSH to the Proxmox host is not available.
+# Requires: proxmox_api_token_id + proxmox_api_token_secret in all.yml
+
+- name: Manage BCM head node VM (API)
+  hosts: localhost
+  gather_facts: false
+  roles:
+    - bcm_vm_api

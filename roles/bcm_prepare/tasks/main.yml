@@ -161,12 +161,41 @@
         done
       become: true
 
-    - name: Rebuild ISO with xorriso
+    - name: Patch isolinux config for unattended auto-install
+      ansible.builtin.shell: |
+        CFG="{{ work_dir.path }}/iso-work/isolinux/isolinux.cfg"
+        if [ -f "$CFG" ]; then
+          # Keep vesamenu.c32 as DEFAULT (required for MENU directives)
+          # Set timeout to instant and mark text installer as MENU DEFAULT
+          sed -i 's/^TIMEOUT .*/TIMEOUT 1/' "$CFG"
+          sed -i 's/^PROMPT .*/PROMPT 0/' "$CFG"
+          # Add MENU DEFAULT to text installer entry
+          sed -i '/LABEL Start Base Command Manager Text Installer/a MENU DEFAULT' "$CFG"
+          # Add net.ifnames + serial console to text installer entry
+          sed -i 's|systemd.unit=multi-user.target|systemd.unit=multi-user.target net.ifnames=0 biosdevname=0 console=tty0 console=ttyS0,115200|' "$CFG"
+          echo "Patched: $CFG"
+          cat "$CFG"
+        fi
+      become: true
+
+    - name: Extract MBR from original ISO for hybrid boot
+      ansible.builtin.shell: |
+        dd if={{ dist_dir }}/{{ iso_filename }} bs=432 count=1 of={{ work_dir.path }}/mbr.bin 2>/dev/null
+      become: true
+
+    - name: Rebuild ISO with xorriso (preserving BIOS + EFI boot)
       ansible.builtin.shell: |
         xorriso -as mkisofs \
           -o {{ build_dir }}/bcm-autoinstall.iso \
           -V "BCMINSTALLERHEAD" \
           -J -R \
+          -isohybrid-mbr {{ work_dir.path }}/mbr.bin \
+          -b isolinux/isolinux.bin \
+            -no-emul-boot -boot-load-size 4 -boot-info-table \
+          -eltorito-alt-boot \
+          -e efi.img \
+            -no-emul-boot \
+            -isohybrid-gpt-basdat \
           {{ work_dir.path }}/iso-work 2>&1
       become: true
 

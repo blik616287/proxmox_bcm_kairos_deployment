@@ -61,9 +61,9 @@
           --memory {{ bcm_vm_memory }} \
           --cores {{ bcm_vm_cores }} \
           --bios seabios \
-          --net0 virtio={{ bcm_vm_mac_internal }},bridge={{ bcm_internal_bridge }} \
-          --net1 virtio={{ bcm_vm_mac_external }},bridge=vmbr0 \
-          --scsi0 local-lvm:{{ bcm_vm_disk_size | regex_replace('G$', '') }},format=raw \
+          --net0 virtio={{ bcm_vm_mac_internal }},bridge={{ bcm_internal_bridge }}{% if bcm_vlan_tag is defined %},tag={{ bcm_vlan_tag }}{% endif %} \
+          --net1 virtio={{ bcm_vm_mac_external }},bridge={{ bcm_external_bridge | default('vmbr0') }}{% if bcm_external_vlan_tag is defined %},tag={{ bcm_external_vlan_tag }}{% endif %} \
+          --scsi0 {{ proxmox_storage | default('local-lvm') }}:{{ bcm_vm_disk_size | regex_replace('G$', '') }},format=raw \
           --scsihw virtio-scsi-pci \
           --ide2 local:iso/{{ iso_filename }},media=cdrom \
           --ostype l26 \

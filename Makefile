@@ -80,6 +80,10 @@ bcm-prepare: ## Stage 2: Download + patch + remaster BCM ISO
 bcm-vm-create: ## Stage 3: Create BCM head node VM in Proxmox
 	$(call run-playbook,03-bcm-vm.yml)
 
+.PHONY: bcm-vm-create-api
+bcm-vm-create-api: ## Stage 3 (API): Create BCM VM via Proxmox API (no SSH required)
+	$(call run-playbook,03-bcm-vm-api.yml)
+
 .PHONY: kairos-build
 kairos-build: ## Stage 4: Build Kairos ISO + raw disk image via QEMU
 	$(call run-playbook,04-kairos-build.yml)
