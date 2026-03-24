@@ -15,27 +15,128 @@ echo " BCM Automated Installation"
 echo " $(date)"
 echo "=========================================="
 
-{% if bcm_static_network | default(false) | bool %}
-# Static network config (DHCP disabled on this VLAN)
-echo "[..] Configuring static network..."
-for iface in eth0 eth1 ens18 ens19; do
-    ip link set "$iface" up 2>/dev/null || true
+# Read network config from cloud-init CIDATA drive and apply it
+# Cloud-init doesn't run in the ramdisk, so we parse the drive directly
+echo "[..] Looking for cloud-init CIDATA drive..."
+mkdir -p /mnt/cidata
+CIDATA_FOUND=false
+for dev in /dev/sr0 /dev/sr1 /dev/sr2 /dev/sr3 /dev/vdb /dev/sdb; do
+    [ -b "$dev" ] || continue
+    if mount -o ro "$dev" /mnt/cidata 2>/dev/null; then
+        if [ -f /mnt/cidata/network-config ]; then
+            CIDATA_FOUND=true
+            echo "[OK] CIDATA from $dev"
+            break
+        fi
+        umount /mnt/cidata 2>/dev/null
+    fi
 done
-ip addr add {{ bcm_internal_ip }}/{{ bcm_internal_netmask | default('16') }} dev eth0 2>/dev/null || \
-    ip addr add {{ bcm_internal_ip }}/{{ bcm_internal_netmask | default('16') }} dev ens18 2>/dev/null || true
-{% if bcm_external_ip is defined %}
-ip addr add {{ bcm_external_ip }}/{{ bcm_external_netmask | default('24') }} dev eth1 2>/dev/null || \
-    ip addr add {{ bcm_external_ip }}/{{ bcm_external_netmask | default('24') }} dev ens19 2>/dev/null || true
-{% endif %}
-{% if bcm_external_gateway is defined %}
-ip route add default via {{ bcm_external_gateway }} 2>/dev/null || true
-{% endif %}
-{% if bcm_external_dns is defined %}
-echo "nameserver {{ bcm_external_dns }}" > /etc/resolv.conf
-{% endif %}
-echo "[OK] Network configured"
-ip -br addr | grep -v lo
-{% endif %}
+# Also try by label
+if [ "$CIDATA_FOUND" = "false" ]; then
+    CIDEV=$(findfs LABEL=CIDATA 2>/dev/null || findfs LABEL=cidata 2>/dev/null || true)
+    if [ -n "$CIDEV" ] && mount -o ro "$CIDEV" /mnt/cidata 2>/dev/null; then
+        [ -f /mnt/cidata/network-config ] && CIDATA_FOUND=true && echo "[OK] CIDATA from $CIDEV (label)"
+    fi
+fi
+
+if [ "$CIDATA_FOUND" = "true" ] && [ -f /mnt/cidata/network-config ]; then
+    echo "[..] Applying network config from CIDATA..."
+    NC="/mnt/cidata/network-config"
+    cat "$NC"
+    # Proxmox uses cloud-init v1 format:
+    #   - type: physical / name: eth0 / subnets: [{address: x.x.x.x, netmask: y, gateway: z}]
+    #   - type: nameserver / address: [dns]
+    # Also support v2 netplan format
+    if grep -q "version: 1" "$NC"; then
+        # V1 format — parse physical interfaces by name
+        # Note: match "address:" but NOT "mac_address:" (which also contains "address:")
+        ETH0_IP=$(awk '/name:.*eth0/{found=1} found && /^ *address:/ && !/mac_address/{print $2; exit}' "$NC" | tr -d "'\"")
+        ETH0_NETMASK=$(awk '/name:.*eth0/{found=1} found && /netmask:/{print $2; exit}' "$NC" | tr -d "'\"")
+        ETH1_IP=$(awk '/name:.*eth1/{found=1} found && /^ *address:/ && !/mac_address/{print $2; exit}' "$NC" | tr -d "'\"")
+        ETH1_NETMASK=$(awk '/name:.*eth1/{found=1} found && /netmask:/{print $2; exit}' "$NC" | tr -d "'\"")
+        GW=$(awk '/gateway:/{print $2; exit}' "$NC" | tr -d "'\"")
+        DNS=$(awk '/type: nameserver/{found=1} found && /- /{gsub(/[^0-9.]/,""); if(length>0){print; exit}}' "$NC")
+        # Convert dotted netmask to CIDR prefix
+        if [ -n "$ETH0_NETMASK" ]; then
+            ETH0_MASK=$(echo "$ETH0_NETMASK" | awk -F. '{for(i=1;i<=4;i++){b=0;v=$i;while(v>0){b+=v%2;v=int(v/2)};t+=b}}END{print t}')
+        else
+            ETH0_MASK="24"
+        fi
+        if [ -n "$ETH1_NETMASK" ]; then
+            ETH1_MASK=$(echo "$ETH1_NETMASK" | awk -F. '{for(i=1;i<=4;i++){b=0;v=$i;while(v>0){b+=v%2;v=int(v/2)};t+=b}}END{print t}')
+        else
+            ETH1_MASK="24"
+        fi
+        [ -n "$ETH0_IP" ] && ETH0_CIDR="${ETH0_IP}/${ETH0_MASK}"
+        [ -n "$ETH1_IP" ] && ETH1_CIDR="${ETH1_IP}/${ETH1_MASK}"
+    else
+        # V2 netplan format
+        ETH0_CIDR=$(grep -A10 'internal\|eth0\|ens18' "$NC" | grep -oP '\d+\.\d+\.\d+\.\d+/\d+' | head -1)
+        ETH1_CIDR=$(grep -A10 'external\|eth1\|ens19' "$NC" | grep -oP '\d+\.\d+\.\d+\.\d+/\d+' | head -1)
+        GW=$(grep -A2 'gateway\|via' "$NC" | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1)
+        DNS=$(grep -A3 'nameserver\|dns' "$NC" | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1)
+        ETH0_IP="${ETH0_CIDR%/*}"; ETH0_MASK="${ETH0_CIDR#*/}"
+        ETH1_IP="${ETH1_CIDR%/*}"; ETH1_MASK="${ETH1_CIDR#*/}"
+    fi
+    umount /mnt/cidata 2>/dev/null
+
+    if [ -n "$ETH0_CIDR" ]; then
+        ETH0_IP="${ETH0_CIDR%/*}"
+        ETH0_MASK="${ETH0_CIDR#*/}"
+        ETH1_IP="${ETH1_CIDR%/*}"
+        ETH1_MASK="${ETH1_CIDR#*/}"
+
+        # Bring up interfaces and assign IPs
+        for iface in eth0 eth1 ens18 ens19; do
+            ip link set "$iface" up 2>/dev/null || true
+        done
+        ip addr add "${ETH0_CIDR}" dev eth0 2>/dev/null || ip addr add "${ETH0_CIDR}" dev ens18 2>/dev/null || true
+        [ -n "$ETH1_CIDR" ] && { ip addr add "${ETH1_CIDR}" dev eth1 2>/dev/null || ip addr add "${ETH1_CIDR}" dev ens19 2>/dev/null || true; }
+        [ -n "$GW" ] && ip route add default via "$GW" 2>/dev/null || true
+        [ -n "$DNS" ] && echo "nameserver $DNS" > /etc/resolv.conf
+        echo "[OK] Network applied: eth0=${ETH0_CIDR} eth1=${ETH1_CIDR} gw=${GW}"
+        ip -br addr | grep -v lo
+    else
+        echo "[WARN] Could not parse IPs from CIDATA"
+    fi
+else
+    echo "[INFO] No CIDATA drive found — using DHCP/existing config"
+    # Fall back to detecting IPs from running interfaces
+    ETH0_IP=$(ip -4 addr show eth0 2>/dev/null | grep -oP 'inet \K[0-9.]+' || \
+              ip -4 addr show ens18 2>/dev/null | grep -oP 'inet \K[0-9.]+' || true)
+    ETH0_MASK=$(ip -4 addr show eth0 2>/dev/null | grep -oP 'inet [0-9.]+/\K[0-9]+' || \
+                ip -4 addr show ens18 2>/dev/null | grep -oP 'inet [0-9.]+/\K[0-9]+' || true)
+    ETH1_IP=$(ip -4 addr show eth1 2>/dev/null | grep -oP 'inet \K[0-9.]+' || \
+              ip -4 addr show ens19 2>/dev/null | grep -oP 'inet \K[0-9.]+' || true)
+    ETH1_MASK=$(ip -4 addr show eth1 2>/dev/null | grep -oP 'inet [0-9.]+/\K[0-9]+' || \
+                ip -4 addr show ens19 2>/dev/null | grep -oP 'inet [0-9.]+/\K[0-9]+' || true)
+    GW=$(ip route show default 2>/dev/null | grep -oP 'via \K[0-9.]+' | head -1 || true)
+fi
+echo "[OK] eth0=${ETH0_IP:-none}/${ETH0_MASK:-none} eth1=${ETH1_IP:-none}/${ETH1_MASK:-none} gw=${GW:-none}"
+
+# Patch build-config.xml with IPs so BCM uses them
+if [ -n "$ETH0_IP" ] && [ -f /cm/build-config.xml ]; then
+    echo "[..] Patching build-config.xml..."
+    cidr_to_mask() {
+        local bits=$1 mask="" i
+        for i in 1 2 3 4; do
+            if [ $bits -ge 8 ]; then mask="${mask}255"; bits=$((bits-8))
+            else mask="${mask}$((256 - 2**(8-bits)))"; bits=0; fi
+            [ $i -lt 4 ] && mask="${mask}."
+        done
+        echo "$mask"
+    }
+    NETMASK=$(cidr_to_mask "${ETH0_MASK:-24}")
+    IFS='.' read -r a b c d <<< "$ETH0_IP"
+    IFS='.' read -r ma mb mc md <<< "$NETMASK"
+    BASE="$((a&ma)).$((b&mb)).$((c&mc)).$((d&md))"
+    sed -i "s|<ipaddress0>.*</ipaddress0>|<ipaddress0>${ETH0_IP}</ipaddress0>|" /cm/build-config.xml 2>/dev/null || true
+    sed -i "s|<ipaddress1>.*</ipaddress1>|<ipaddress1>${ETH1_IP}</ipaddress1>|" /cm/build-config.xml 2>/dev/null || true
+    sed -i "s|<netmask>.*</netmask>|<netmask>${NETMASK}</netmask>|g" /cm/build-config.xml 2>/dev/null || true
+    sed -i "s|<gateway>.*</gateway>|<gateway>${GW}</gateway>|g" /cm/build-config.xml 2>/dev/null || true
+    sed -i "s|<networkbase>.*</networkbase>|<networkbase>${BASE}</networkbase>|g" /cm/build-config.xml 2>/dev/null || true
+    echo "[OK] build-config.xml patched"
+fi
 
 PASS="{{ bcm_password }}"
 mkdir -p /mnt/config
