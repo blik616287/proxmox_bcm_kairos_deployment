@@ -15,6 +15,28 @@ echo " BCM Automated Installation"
 echo " $(date)"
 echo "=========================================="
 
+{% if bcm_static_network | default(false) | bool %}
+# Static network config (DHCP disabled on this VLAN)
+echo "[..] Configuring static network..."
+for iface in eth0 eth1 ens18 ens19; do
+    ip link set "$iface" up 2>/dev/null || true
+done
+ip addr add {{ bcm_internal_ip }}/{{ bcm_internal_netmask | default('16') }} dev eth0 2>/dev/null || \
+    ip addr add {{ bcm_internal_ip }}/{{ bcm_internal_netmask | default('16') }} dev ens18 2>/dev/null || true
+{% if bcm_external_ip is defined %}
+ip addr add {{ bcm_external_ip }}/{{ bcm_external_netmask | default('24') }} dev eth1 2>/dev/null || \
+    ip addr add {{ bcm_external_ip }}/{{ bcm_external_netmask | default('24') }} dev ens19 2>/dev/null || true
+{% endif %}
+{% if bcm_external_gateway is defined %}
+ip route add default via {{ bcm_external_gateway }} 2>/dev/null || true
+{% endif %}
+{% if bcm_external_dns is defined %}
+echo "nameserver {{ bcm_external_dns }}" > /etc/resolv.conf
+{% endif %}
+echo "[OK] Network configured"
+ip -br addr | grep -v lo
+{% endif %}
+
 PASS="{{ bcm_password }}"
 mkdir -p /mnt/config
 for dev in /dev/vdb /dev/sdb /dev/vdb1 /dev/sdb1; do
@@ -59,6 +81,27 @@ yes | perl ./cm-master-install --config /cm/build-config.xml --mountpath /mnt/cd
 RETVAL=${PIPESTATUS[1]}
 if [ $RETVAL -ne 0 ]; then
     echo " INSTALLATION FAILED (exit code: $RETVAL)"; exit $RETVAL
+fi
+
+# Apply static network config from config drive if present
+if [ -f /mnt/config/netplan.yaml ]; then
+    echo "[..] Applying static network config from config drive..."
+    INSTALLED_ROOT=""
+    mkdir -p /mnt/installed
+    for part in $(ls /dev/mapper/*-root /dev/mapper/*root 2>/dev/null) /dev/vda5 /dev/sda5 \
+        $(lsblk -rno PATH,FSTYPE 2>/dev/null | awk '$2 == "ext4" || $2 == "xfs" {print $1}') \
+        /dev/vda2 /dev/vda1 /dev/sda2 /dev/sda1; do
+        [ -b "$part" ] || continue
+        if mount "$part" /mnt/installed 2>/dev/null; then
+            if [ -d /mnt/installed/etc/netplan ]; then
+                cp /mnt/config/netplan.yaml /mnt/installed/etc/netplan/01-static.yaml
+                echo "[OK] Network config applied to $part"
+                umount /mnt/installed 2>/dev/null
+                break
+            fi
+            umount /mnt/installed 2>/dev/null
+        fi
+    done
 fi
 
 echo "[..] Fixing GRUB..."

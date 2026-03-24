@@ -1,0 +1,25 @@
+network:
+  version: 2
+  ethernets:
+    eth0:
+      addresses:
+      - "{{ bcm_internal_ip }}/{{ bcm_internal_netmask | default('16') }}"
+{% if bcm_external_ip is defined %}
+    eth1:
+      addresses:
+      - "{{ bcm_external_ip }}/{{ bcm_external_netmask | default('24') }}"
+{% if bcm_external_gateway is defined %}
+      routes:
+      - to: "default"
+        via: "{{ bcm_external_gateway }}"
+{% endif %}
+{% if bcm_external_dns is defined %}
+      nameservers:
+        addresses:
+        - {{ bcm_external_dns }}
+{% if bcm_external_dns_search is defined %}
+        search:
+        - {{ bcm_external_dns_search }}
+{% endif %}
+{% endif %}
+{% endif %}

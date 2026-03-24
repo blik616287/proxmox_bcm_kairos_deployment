@@ -121,12 +121,19 @@
 
     # ---- Create config drive ----
 
-    - name: Create FAT32 config drive
+    - name: Render netplan config for config drive
+      ansible.builtin.template:
+        src: bcm-netplan.yaml.j2
+        dest: "{{ work_dir.path }}/netplan.yaml"
+        mode: "0644"
+
+    - name: Create FAT32 config drive (password + netplan)
       ansible.builtin.shell: |
         dd if=/dev/zero of={{ build_dir }}/.bcm-init.img bs=1M count=4 2>/dev/null
         mkfs.vfat -n BCMCONFIG {{ build_dir }}/.bcm-init.img >/dev/null 2>&1
         echo -n "{{ bcm_password }}" > {{ work_dir.path }}/password.txt
         mcopy -i {{ build_dir }}/.bcm-init.img {{ work_dir.path }}/password.txt ::password.txt
+        mcopy -i {{ build_dir }}/.bcm-init.img {{ work_dir.path }}/netplan.yaml ::netplan.yaml
 
     # ---- Remaster ISO ----
     # The BCM ISO has filesystem issues when mounted via loop, so use 7z to extract.
@@ -156,7 +163,7 @@
           sed -i 's/set timeout_style=.*/set timeout_style=hidden/' "$GRUB"
           sed -i 's/set default=.*/set default=1/' "$GRUB"
           # Add serial console + net.ifnames to the text installer entry
-          sed -i 's|systemd.unit=multi-user.target|systemd.unit=multi-user.target net.ifnames=0 biosdevname=0 console=tty0 console=ttyS0,115200|' "$GRUB"
+          sed -i 's|systemd.unit=multi-user.target|systemd.unit=multi-user.target net.ifnames=0 biosdevname=0 console=ttyS0,115200 console=tty0|' "$GRUB"
           echo "Patched: $GRUB"
         done
       become: true
@@ -165,14 +172,16 @@
       ansible.builtin.shell: |
         CFG="{{ work_dir.path }}/iso-work/isolinux/isolinux.cfg"
         if [ -f "$CFG" ]; then
-          # Keep vesamenu.c32 as DEFAULT (required for MENU directives)
-          # Set timeout to instant and mark text installer as MENU DEFAULT
+          # Remove "Boot from harddrive" entry (prevents chainloading to disk)
+          sed -i '/LABEL Boot from harddrive/,/^$/d' "$CFG"
+          sed -i '/chain.c32/d' "$CFG"
+          sed -i '/APPEND hd0/d' "$CFG"
+          # Set timeout and mark text installer as default
           sed -i 's/^TIMEOUT .*/TIMEOUT 1/' "$CFG"
           sed -i 's/^PROMPT .*/PROMPT 0/' "$CFG"
-          # Add MENU DEFAULT to text installer entry
           sed -i '/LABEL Start Base Command Manager Text Installer/a MENU DEFAULT' "$CFG"
           # Add net.ifnames + serial console to text installer entry
-          sed -i 's|systemd.unit=multi-user.target|systemd.unit=multi-user.target net.ifnames=0 biosdevname=0 console=tty0 console=ttyS0,115200|' "$CFG"
+          sed -i 's|systemd.unit=multi-user.target|systemd.unit=multi-user.target net.ifnames=0 biosdevname=0 console=ttyS0,115200 console=tty0|' "$CFG"
           echo "Patched: $CFG"
           cat "$CFG"
         fi
