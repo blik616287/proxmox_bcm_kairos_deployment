@@ -78,7 +78,6 @@ if [ "$CIDATA_FOUND" = "true" ] && [ -f /mnt/cidata/network-config ]; then
         ETH0_IP="${ETH0_CIDR%/*}"; ETH0_MASK="${ETH0_CIDR#*/}"
         ETH1_IP="${ETH1_CIDR%/*}"; ETH1_MASK="${ETH1_CIDR#*/}"
     fi
-    umount /mnt/cidata 2>/dev/null
 
     if [ -n "$ETH0_CIDR" ]; then
         ETH0_IP="${ETH0_CIDR%/*}"
@@ -114,29 +113,119 @@ else
 fi
 echo "[OK] eth0=${ETH0_IP:-none}/${ETH0_MASK:-none} eth1=${ETH1_IP:-none}/${ETH1_MASK:-none} gw=${GW:-none}"
 
-# Patch build-config.xml with IPs so BCM uses them
-if [ -n "$ETH0_IP" ] && [ -f /cm/build-config.xml ]; then
-    echo "[..] Patching build-config.xml..."
-    cidr_to_mask() {
-        local bits=$1 mask="" i
-        for i in 1 2 3 4; do
-            if [ $bits -ge 8 ]; then mask="${mask}255"; bits=$((bits-8))
-            else mask="${mask}$((256 - 2**(8-bits)))"; bits=0; fi
-            [ $i -lt 4 ] && mask="${mask}."
-        done
-        echo "$mask"
-    }
-    NETMASK=$(cidr_to_mask "${ETH0_MASK:-24}")
-    IFS='.' read -r a b c d <<< "$ETH0_IP"
-    IFS='.' read -r ma mb mc md <<< "$NETMASK"
-    BASE="$((a&ma)).$((b&mb)).$((c&mc)).$((d&md))"
-    sed -i "s|<ipaddress0>.*</ipaddress0>|<ipaddress0>${ETH0_IP}</ipaddress0>|" /cm/build-config.xml 2>/dev/null || true
-    sed -i "s|<ipaddress1>.*</ipaddress1>|<ipaddress1>${ETH1_IP}</ipaddress1>|" /cm/build-config.xml 2>/dev/null || true
-    sed -i "s|<netmask>.*</netmask>|<netmask>${NETMASK}</netmask>|g" /cm/build-config.xml 2>/dev/null || true
-    sed -i "s|<gateway>.*</gateway>|<gateway>${GW}</gateway>|g" /cm/build-config.xml 2>/dev/null || true
-    sed -i "s|<networkbase>.*</networkbase>|<networkbase>${BASE}</networkbase>|g" /cm/build-config.xml 2>/dev/null || true
-    echo "[OK] build-config.xml patched"
+# Render build-config.xml from template using CIDATA values
+if [ "$CIDATA_FOUND" = "true" ] && [ -f /cm/build-config.xml.tpl ] && [ -f /mnt/cidata/network-config ]; then
+    echo "[..] Rendering build-config.xml from CIDATA..."
+    python3 << 'PYRENDER'
+import yaml
+from jinja2 import Template
+
+# Parse CIDATA network-config
+with open('/mnt/cidata/network-config') as f:
+    nc = yaml.safe_load(f)
+
+# Extract physical interfaces and nameserver from cloud-init config
+phys = []
+dns = []
+for entry in nc.get('config', []):
+    if entry.get('type') == 'physical':
+        iface = {'name': entry['name'], 'mac': entry.get('mac_address', '')}
+        for sub in entry.get('subnets', []):
+            iface['ip'] = sub.get('address', '')
+            iface['netmask'] = sub.get('netmask', '255.255.255.0')
+            iface['gateway'] = sub.get('gateway', '')
+        phys.append(iface)
+    elif entry.get('type') == 'nameserver':
+        dns = entry.get('address', [])
+
+# Helper: dotted netmask to CIDR bits
+def mask_to_bits(mask):
+    return sum(bin(int(x)).count('1') for x in mask.split('.'))
+
+# Helper: compute network base
+def net_base(ip, bits):
+    parts = [int(x) for x in ip.split('.')]
+    mask_parts = []
+    for i in range(4):
+        if bits >= 8:
+            mask_parts.append(255); bits -= 8
+        else:
+            mask_parts.append(256 - (1 << (8 - bits))); bits = 0
+    return '.'.join(str(p & m) for p, m in zip(parts, mask_parts))
+
+# Build networks and interfaces from parsed NICs
+# First NIC = internalnet (provisioning), rest = externalnet
+networks = []
+interfaces = []
+for i, nic in enumerate(phys):
+    bits = mask_to_bits(nic.get('netmask', '255.255.255.0'))
+    base = net_base(nic['ip'], bits)
+    base_prefix = nic['ip'].rsplit('.', 1)[0]
+
+    if i == 0:
+        networks.append({
+            'name': 'internalnet', 'type': 'internal',
+            'base': base, 'maskbits': str(bits),
+            'domain': 'eth.cluster',
+            'dyn_start': base_prefix + '.16',
+            'dyn_end': base_prefix + '.200',
+        })
+        interfaces.append({
+            'name': nic['name'], 'network': 'internalnet',
+            'ip': nic['ip'], 'provisioning': True,
+        })
+    else:
+        net = {
+            'name': 'externalnet', 'type': 'external',
+            'base': base, 'maskbits': str(bits),
+            'domain': 'brightcomputing.com',
+        }
+        if nic.get('gateway'):
+            net['gateway'] = nic['gateway']
+        networks.append(net)
+        interfaces.append({
+            'name': nic['name'], 'network': 'externalnet',
+            'ip': nic['ip'],
+        })
+
+# Slave node IP = first usable address in internal network
+slave_ip = interfaces[0]['ip'].rsplit('.', 1)[0] + '.1' if interfaces else '10.141.0.1'
+
+# Read hostname from meta-data if available
+hostname = 'bcm-head'
+try:
+    with open('/mnt/cidata/meta-data') as f:
+        meta = yaml.safe_load(f)
+        hostname = meta.get('local-hostname', hostname)
+except Exception:
+    pass
+
+# Render template
+with open('/cm/build-config.xml.tpl') as f:
+    tpl = Template(f.read())
+
+result = tpl.render(
+    networks=networks,
+    interfaces=interfaces,
+    hostname=hostname,
+    timezone=meta.get('timezone', 'America/Los_Angeles'),
+    slave_ip=slave_ip,
+)
+
+with open('/cm/build-config.xml', 'w') as f:
+    f.write(result)
+
+print(f"[OK] Rendered build-config.xml: {len(networks)} networks, {len(interfaces)} interfaces")
+for n in networks:
+    print(f"  {n['name']}: base={n['base']}/{n['maskbits']}")
+for iface in interfaces:
+    print(f"  {iface['name']}: {iface['ip']} -> {iface['network']}")
+PYRENDER
+else
+    echo "[INFO] No CIDATA or no template — using default build-config.xml"
 fi
+
+umount /mnt/cidata 2>/dev/null
 
 PASS="{{ bcm_password }}"
 mkdir -p /mnt/config

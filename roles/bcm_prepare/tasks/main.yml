@@ -73,7 +73,20 @@
         state: unmounted
       become: true
 
-    - name: Patch build-config.xml hostname
+    - name: Copy build-config.xml template into rootfs
+      ansible.builtin.copy:
+        src: build-config.xml.tpl
+        dest: "{{ work_dir.path }}/rootfs/cm/build-config.xml.tpl"
+        mode: "0644"
+      become: true
+
+    - name: Install jinja2 and pyyaml into rootfs
+      ansible.builtin.shell: |
+        chroot {{ work_dir.path }}/rootfs pip3 install --break-system-packages jinja2 pyyaml 2>/dev/null || \
+        pip3 install --target {{ work_dir.path }}/rootfs/usr/lib/python3/dist-packages jinja2 pyyaml
+      become: true
+
+    - name: Patch build-config.xml hostname (used when CIDATA is absent)
       ansible.builtin.replace:
         path: "{{ work_dir.path }}/rootfs/cm/build-config.xml"
         regexp: '<hostname>bcm11-headnode</hostname>'
