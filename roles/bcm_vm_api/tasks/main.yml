@@ -32,13 +32,37 @@
       "{{ pve_api_url }}/api2/json/nodes/{{ proxmox_node }}/storage/local/content" | \
       grep -q "$ISO_NAME"; then
       echo "$ISO_NAME already uploaded"
-    else
-      echo "Uploading $ISO_NAME (this may take several minutes)..."
-      curl -sk -X POST -H "Authorization: $AUTH" \
-        -F "content=iso" \
-        -F "filename=@{{ build_dir }}/bcm-autoinstall.iso;filename=${ISO_NAME}" \
-        "$API"
+      exit 0
     fi
+    echo "Uploading $ISO_NAME (this may take several minutes)..."
+    RESULT=$(curl -sk -X POST -H "Authorization: $AUTH" \
+      -F "content=iso" \
+      -F "filename=@{{ build_dir }}/bcm-autoinstall.iso;filename=${ISO_NAME}" \
+      "$API")
+    echo "$RESULT"
+    # Extract imgcopy UPID and wait for it to complete
+    UPID=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['data'])" 2>/dev/null || true)
+    if [ -z "$UPID" ]; then
+      echo "WARNING: Could not extract imgcopy UPID, upload may still be in progress"
+      exit 0
+    fi
+    # The UPID contains the node name — extract it
+    UPID_NODE=$(echo "$UPID" | cut -d: -f2)
+    echo "Waiting for imgcopy on $UPID_NODE..."
+    ELAPSED=0
+    while [ $ELAPSED -lt 600 ]; do
+      STATUS=$(curl -sk -H "Authorization: $AUTH" \
+        "{{ pve_api_url }}/api2/json/nodes/${UPID_NODE}/tasks/$(python3 -c "import urllib.parse; print(urllib.parse.quote('${UPID}', safe=''))")/status" 2>/dev/null | \
+        python3 -c "import sys,json; d=json.load(sys.stdin)['data']; print(d.get('status',''), d.get('exitstatus',''))" 2>/dev/null)
+      if echo "$STATUS" | grep -q "stopped"; then
+        echo "imgcopy complete: $STATUS"
+        echo "$STATUS" | grep -q "OK" && exit 0 || exit 1
+      fi
+      sleep 5
+      ELAPSED=$((ELAPSED + 5))
+    done
+    echo "TIMEOUT waiting for imgcopy"
+    exit 1
   delegate_to: localhost
   timeout: 1800
 

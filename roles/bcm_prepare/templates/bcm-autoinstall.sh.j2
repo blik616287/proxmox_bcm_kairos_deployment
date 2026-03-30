@@ -228,16 +228,6 @@ fi
 umount /mnt/cidata 2>/dev/null
 
 PASS="{{ bcm_password }}"
-mkdir -p /mnt/config
-for dev in /dev/vdb /dev/sdb /dev/vdb1 /dev/sdb1; do
-    if [ -b "$dev" ]; then
-        if mount "$dev" /mnt/config 2>/dev/null; then
-            [ -f /mnt/config/password.txt ] && PASS=$(cat /mnt/config/password.txt)
-            echo "[OK] Config drive from $dev"
-            break
-        fi
-    fi
-done
 
 echo "[..] Waiting for installer environment..."
 TRIES=0
@@ -273,28 +263,7 @@ if [ $RETVAL -ne 0 ]; then
     echo " INSTALLATION FAILED (exit code: $RETVAL)"; exit $RETVAL
 fi
 
-# Apply static network config from config drive if present
-if [ -f /mnt/config/netplan.yaml ]; then
-    echo "[..] Applying static network config from config drive..."
-    INSTALLED_ROOT=""
-    mkdir -p /mnt/installed
-    for part in $(ls /dev/mapper/*-root /dev/mapper/*root 2>/dev/null) /dev/vda5 /dev/sda5 \
-        $(lsblk -rno PATH,FSTYPE 2>/dev/null | awk '$2 == "ext4" || $2 == "xfs" {print $1}') \
-        /dev/vda2 /dev/vda1 /dev/sda2 /dev/sda1; do
-        [ -b "$part" ] || continue
-        if mount "$part" /mnt/installed 2>/dev/null; then
-            if [ -d /mnt/installed/etc/netplan ]; then
-                cp /mnt/config/netplan.yaml /mnt/installed/etc/netplan/01-static.yaml
-                echo "[OK] Network config applied to $part"
-                umount /mnt/installed 2>/dev/null
-                break
-            fi
-            umount /mnt/installed 2>/dev/null
-        fi
-    done
-fi
-
-echo "[..] Fixing GRUB..."
+echo "[..] Patching installed system GRUB + networking..."
 vgchange -ay 2>/dev/null || true; sleep 1
 INSTALLED_ROOT=""
 mkdir -p /mnt/installed
@@ -308,16 +277,38 @@ for part in $(ls /dev/mapper/*-root /dev/mapper/*root 2>/dev/null) /dev/vda5 /de
     fi
 done
 if [ -n "$INSTALLED_ROOT" ]; then
-    grep -q "net.ifnames=0" /mnt/installed/etc/default/grub || \
-        sed -i 's/biosdevname=0/net.ifnames=0 biosdevname=0/' /mnt/installed/etc/default/grub
+    echo "[OK] Found installed root at $INSTALLED_ROOT"
+
+    # Add net.ifnames=0 biosdevname=0 to GRUB_CMDLINE_LINUX
+    if ! grep -q "net.ifnames=0" /mnt/installed/etc/default/grub; then
+        sed -i 's/^GRUB_CMDLINE_LINUX="\(.*\)"/GRUB_CMDLINE_LINUX="\1 net.ifnames=0 biosdevname=0"/' /mnt/installed/etc/default/grub
+        echo "[OK] Patched /etc/default/grub"
+    fi
+
+    # Mount /boot and patch grub.cfg directly
     BOOT_PART=""
     for bp in /dev/vda1 /dev/sda1; do
         [ -b "$bp" ] && mount "$bp" /mnt/installed/boot 2>/dev/null && BOOT_PART="$bp" && break
     done
-    [ -f /mnt/installed/boot/grub/grub.cfg ] && \
-        sed -i 's/biosdevname=0/net.ifnames=0 biosdevname=0/g' /mnt/installed/boot/grub/grub.cfg
+    if [ -f /mnt/installed/boot/grub/grub.cfg ]; then
+        if ! grep -q "net.ifnames=0" /mnt/installed/boot/grub/grub.cfg; then
+            sed -i '/^\s*linux\s/s/$/ net.ifnames=0 biosdevname=0/' /mnt/installed/boot/grub/grub.cfg
+            echo "[OK] Patched grub.cfg"
+        fi
+    fi
     [ -n "$BOOT_PART" ] && umount /mnt/installed/boot 2>/dev/null
+
+    # Install dual NIC ARP fix (oneshot service, only activates if both NICs share a subnet)
+    cp /usr/local/sbin/fix-dual-nic-arp.sh /mnt/installed/usr/local/sbin/fix-dual-nic-arp.sh
+    chmod +x /mnt/installed/usr/local/sbin/fix-dual-nic-arp.sh
+    cp /usr/lib/systemd/system/fix-dual-nic-arp.service /mnt/installed/usr/lib/systemd/system/fix-dual-nic-arp.service
+    mkdir -p /mnt/installed/etc/systemd/system/multi-user.target.wants
+    ln -sf /usr/lib/systemd/system/fix-dual-nic-arp.service /mnt/installed/etc/systemd/system/multi-user.target.wants/fix-dual-nic-arp.service
+    echo "[OK] Installed dual NIC ARP fix service"
+
     umount /mnt/installed 2>/dev/null
+else
+    echo "[WARN] Could not find installed root partition"
 fi
 echo "=========================================="
 echo " INSTALLATION COMPLETE - rebooting..."

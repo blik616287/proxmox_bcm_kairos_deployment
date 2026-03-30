@@ -1,0 +1,12 @@
+[Unit]
+Description=Fix ARP for dual NICs on same subnet
+After=network-online.target cmfirstboot.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/fix-dual-nic-arp.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

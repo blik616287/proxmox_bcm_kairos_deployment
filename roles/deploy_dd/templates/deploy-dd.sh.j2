@@ -110,6 +110,12 @@ else
     cmsh -c "softwareimage; clone default-image kairos-installer; commit" 2>&1
     echo "[OK] kairos-installer image created"
 fi
+# Wait for image filesystem to be fully provisioned
+TRIES=0
+while [ ! -d /cm/images/kairos-installer/usr ] && [ $TRIES -lt 60 ]; do
+    sleep 2; TRIES=$((TRIES + 1))
+done
+[ -d /cm/images/kairos-installer/usr ] && echo "[OK] Image filesystem ready" || { echo "[FAIL] Image not provisioned after 120s"; exit 1; }
 EOF
 
 # 4. Install dd script + service into the software image
