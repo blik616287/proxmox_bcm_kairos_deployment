@@ -86,7 +86,7 @@ stages:
               -i /var/lib/bcm/bcm-key \
               root@{{ bcm_internal_ip }}:/cm/node-installer/certificates/${NODE_MAC}/key \
               /var/lib/cm/cmd-etc/cert.key 2>/dev/null || true
-          unshare --mount --fork /bin/bash -c "
+          nohup unshare --mount --fork /bin/bash -c "
             mount --bind /var/lib/cm/cmd-etc /var/lib/cm/rootfs/cm/local/apps/cmd/etc
             mount -t proc proc /var/lib/cm/rootfs/proc 2>/dev/null || true
             mount -t sysfs sysfs /var/lib/cm/rootfs/sys 2>/dev/null || true
@@ -101,5 +101,6 @@ stages:
               export HOSTNAME=$(cat /etc/hostname)
               /cm/local/apps/cmd/sbin/cmd -s -n
             '
-          " &
+          " </dev/null >/dev/null 2>&1 &
+          disown
 {% endif %}
