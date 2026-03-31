@@ -1,0 +1,65 @@
+# proxmox
+proxmox_api_host: "172.16.10.101"
+proxmox_api_user: "lab103@pve"
+proxmox_api_password: "=AVHns37!l"
+proxmox_api_token_id: "ansible"
+proxmox_api_token_secret: "34745a90-f532-4693-a640-06895fd09cd4"
+proxmox_node: "swlk-prxmx04"
+proxmox_storage: "data-pure"
+
+# vlan 3101 - internal
+bcm_internal_bridge: vmbr0
+bcm_internal_ip: "172.16.103.201"
+bcm_internal_netmask: "24"
+bcm_internal_cidr: "172.16.103.0/24"
+bcm_vlan_tag: 3103
+
+# vlan 3101 - external
+bcm_external_bridge: vmbr0
+bcm_external_vlan_tag: 3103
+bcm_external_ip: "172.16.103.202"
+bcm_external_netmask: "24"
+bcm_external_gateway: "172.16.103.1"
+bcm_external_dns: "172.16.10.31"
+bcm_external_dns_search: "kosmoslabs.io"
+
+bcm_static_network: true
+# Set to a physical NIC name (e.g., enp2s0) to bridge vmbr1 to hardware.
+# This allows bare metal servers on the same switch to PXE boot from BCM.
+# Leave empty for virtual-only (VM-to-VM only).
+bcm_provisioning_nic: ""
+
+# --- BCM Head Node VM ---
+bcm_vmid: 200
+bcm_vm_name: bcm-headnode
+bcm_vm_cores: 4
+bcm_vm_memory: 8192
+bcm_vm_disk_size: "100G"
+bcm_vm_mac_internal: "BC:24:11:7F:33:7C"
+bcm_vm_mac_external: "BC:24:11:ED:21:50"
+bcm_password: "Br1ghtClust3r"
+bcm_hostname: "bcm11-headnode"
+bcm_timezone: "America/Los_Angeles"
+
+# --- Kairos Compute Node VM ---
+kairos_vmid: 201
+kairos_vm_name: kairos-compute-001
+kairos_vm_cores: 2
+kairos_vm_memory: 4096
+kairos_vm_disk_size: "80G"
+kairos_vm_mac: "52:54:00:00:02:01"
+
+# --- Palette ---
+palette_endpoint: "api.spectrocloud.com"
+palette_token: "NjQzYTczOTRmMjYyNzAzN2VmOWFmODU0YmMyYzFhOTE="
+palette_project_uid: "68e6a683b6b66c6045d1b584"
+
+# --- Kairos Build ---
+kairos_kernel_version: "6.8.0-87-generic"
+kairos_container_registry: "ttl.sh"
+
+# --- Paths ---
+e2e_dir: "{{ playbook_dir | default('.') }}/.."
+build_dir: "{{ e2e_dir }}/build"
+dist_dir: "{{ e2e_dir }}/dist"
+

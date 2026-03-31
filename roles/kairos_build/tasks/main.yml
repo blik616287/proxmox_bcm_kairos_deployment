@@ -27,6 +27,12 @@
 
 # ---- Build Kairos ISO ----
 
+- name: Ensure build directory exists
+  ansible.builtin.file:
+    path: "{{ build_dir }}"
+    state: directory
+    mode: "0755"
+
 - name: Check if Kairos ISO exists
   ansible.builtin.stat:
     path: "{{ build_dir }}/{{ iso_name }}.iso"
