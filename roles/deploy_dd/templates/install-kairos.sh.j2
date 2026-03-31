@@ -36,6 +36,12 @@ echo "[\$(date)] Writing to ${DISK}..."
 /dev/shm/kinstall/sync
 echo "[\$(date)] Fixing GPT backup header..."
 /dev/shm/kinstall/sgdisk -e ${DISK} 2>&1 || true
+echo "[\$(date)] Clearing stale filesystem signatures from OEM partition..."
+OEM_PART=\$(lsblk -nrpo NAME ${DISK} | sed -n '3p')
+if [ -b "\${OEM_PART}" ]; then
+  /dev/shm/kinstall/dd if=/dev/zero of=\${OEM_PART} bs=512 count=1 conv=notrunc 2>&1 || true
+  echo "[\$(date)] Cleared stale signatures on \${OEM_PART}"
+fi
 /dev/shm/kinstall/sync
 echo "[\$(date)] Write complete. Rebooting into Kairos..."
 /dev/shm/kinstall/sleep 2

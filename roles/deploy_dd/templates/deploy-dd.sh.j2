@@ -229,7 +229,7 @@ EOF
 # Register node: set MAC and category on node001 (outside heredoc so COMPUTE_MAC expands)
 ${SSH_CMD} "cmsh -c 'device; use node001' 2>/dev/null && \
     echo -e 'device\nuse node001\nset mac ${COMPUTE_MAC}\nset category kairos\ncommit' | cmsh 2>&1 || \
-    echo -e 'device\nadd physicalnode node001 {{ bcm_internal_ip | regex_replace(\"\\.[0-9]+$\", \".50\") }} eth0\nset category kairos\nset mac ${COMPUTE_MAC}\ncommit' | cmsh 2>&1" 2>/dev/null | filter_motd
+    echo -e 'device\nadd physicalnode node001 {{ bcm_internal_ip.rsplit(".", 1)[0] }}.50 eth0\nset category kairos\nset mac ${COMPUTE_MAC}\ncommit' | cmsh 2>&1" 2>/dev/null | filter_motd
 
 ${SSH_CMD} << 'EOF' | filter_motd
 
