@@ -3,7 +3,7 @@
 export DEBIAN_FRONTEND=noninteractive
 LOG="/var/log/bcm-auto-install.log"
 exec </dev/null >>/dev/console 2>&1
-exec > >(tee -a "$LOG" >/dev/console) 2>&1
+exec > >(tee -a "$LOG" | tee /dev/ttyS0 >/dev/console) 2>&1
 
 systemctl stop serial-getty@ttyS0.service 2>/dev/null || true
 systemctl stop getty@tty1.service 2>/dev/null || true

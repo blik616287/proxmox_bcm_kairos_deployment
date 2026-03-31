@@ -68,7 +68,41 @@ ${SSH_CMD} "grep -qF '${PUBKEY}' /root/.ssh/authorized_keys 2>/dev/null || echo 
 ${SSH_CMD} << 'EOF' | filter_motd
 grep -q 'default-image.*10.0.0.0' /etc/exports 2>/dev/null || echo '/cm/images/default-image 10.0.0.0/8(ro,no_subtree_check,no_root_squash,async)' >> /etc/exports
 grep -q '/cm/shared.*10.0.0.0' /etc/exports 2>/dev/null || echo '/cm/shared 10.0.0.0/8(rw,no_subtree_check,no_root_squash,async)' >> /etc/exports
+grep -q 'kairos-installer' /etc/exports 2>/dev/null || echo '/cm/images/kairos-installer 10.0.0.0/8(ro,no_subtree_check,no_root_squash,async)' >> /etc/exports
 exportfs -ra
+
+# Fix DHCP: ensure BCM's own IP is excluded from pool and router points to actual gateway
+if grep -q 'not authoritative' /etc/dhcpd.conf 2>/dev/null; then
+    sed -i 's/not authoritative/authoritative/' /etc/dhcpd.conf
+fi
+{% if bcm_external_gateway is defined %}
+sed -i 's/option routers .*/option routers                {{ bcm_external_gateway }};/' /etc/dhcpd.conf
+{% endif %}
+# Exclude BCM's own IPs from DHCP pool
+{% if bcm_internal_ip is defined %}
+POOL_END=$(echo "{{ bcm_internal_ip }}" | awk -F. '{printf "%s.%s.%s.%d", $1,$2,$3,$4-1}')
+sed -i "s/range .*/range 10.100.0.16 ${POOL_END};/" /etc/dhcpd.conf
+{% endif %}
+systemctl restart dhcpd
+
+# Ensure rsyncd is running for image provisioning
+cat > /etc/rsyncd.conf << 'RCONF'
+uid = root
+gid = root
+use chroot = no
+read only = yes
+list = yes
+
+[kairos-installer]
+path = /cm/images/kairos-installer
+comment = Kairos installer image
+
+[default-image]
+path = /cm/images/default-image
+comment = Default image
+RCONF
+systemctl enable rsync 2>/dev/null
+systemctl restart rsync
 EOF
 
 step "Deploying Kairos via dd Installer"
@@ -195,7 +229,7 @@ EOF
 # Register node: set MAC and category on node001 (outside heredoc so COMPUTE_MAC expands)
 ${SSH_CMD} "cmsh -c 'device; use node001' 2>/dev/null && \
     echo -e 'device\nuse node001\nset mac ${COMPUTE_MAC}\nset category kairos\ncommit' | cmsh 2>&1 || \
-    echo -e 'device\nadd physicalnode node001 10.141.0.1 eth0\nset category kairos\nset mac ${COMPUTE_MAC}\ncommit' | cmsh 2>&1" 2>/dev/null | filter_motd
+    echo -e 'device\nadd physicalnode node001 {{ bcm_internal_ip | regex_replace(\"\\.[0-9]+$\", \".50\") }} eth0\nset category kairos\nset mac ${COMPUTE_MAC}\ncommit' | cmsh 2>&1" 2>/dev/null | filter_motd
 
 ${SSH_CMD} << 'EOF' | filter_motd
 
