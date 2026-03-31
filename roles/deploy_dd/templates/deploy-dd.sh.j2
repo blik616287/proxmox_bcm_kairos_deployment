@@ -67,6 +67,7 @@ ${SSH_CMD} "grep -qF '${PUBKEY}' /root/.ssh/authorized_keys 2>/dev/null || echo 
 # NFS exports (persistent via /etc/exports)
 ${SSH_CMD} << 'EOF' | filter_motd
 grep -q 'default-image.*10.0.0.0' /etc/exports 2>/dev/null || echo '/cm/images/default-image 10.0.0.0/8(ro,no_subtree_check,no_root_squash,async)' >> /etc/exports
+grep -q 'default-image.*{{ bcm_internal_cidr }}' /etc/exports 2>/dev/null || echo '/cm/images/default-image {{ bcm_internal_cidr }}(ro,no_subtree_check,no_root_squash,async)' >> /etc/exports
 grep -q '/cm/shared.*10.0.0.0' /etc/exports 2>/dev/null || echo '/cm/shared 10.0.0.0/8(rw,no_subtree_check,no_root_squash,async)' >> /etc/exports
 grep -q 'kairos-installer' /etc/exports 2>/dev/null || echo '/cm/images/kairos-installer 10.0.0.0/8(ro,no_subtree_check,no_root_squash,async)' >> /etc/exports
 exportfs -ra
