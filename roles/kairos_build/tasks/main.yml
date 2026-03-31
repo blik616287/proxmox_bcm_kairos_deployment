@@ -173,6 +173,37 @@
         losetup -d "$LOOP"
       become: true
 
+    - name: Patch bootargs and network config for stable interface naming
+      ansible.builtin.shell: |
+        LOOP=$(losetup -fP --show {{ build_dir }}/kairos-disk.raw)
+        # Patch each squashfs image (active, passive, recovery)
+        mkdir -p /tmp/kairos-patch-state /tmp/kairos-patch-img
+        for part_label in p4:cOS/active.img p4:cOS/passive.img p3:cOS/recovery.img; do
+          PART="${LOOP}${part_label%%:*}"
+          IMG="${part_label#*:}"
+          [ -b "$PART" ] || continue
+          mount "$PART" /tmp/kairos-patch-state 2>/dev/null || continue
+          [ -f "/tmp/kairos-patch-state/$IMG" ] || { umount /tmp/kairos-patch-state; continue; }
+          IMG_LOOP=$(losetup -f --show "/tmp/kairos-patch-state/$IMG")
+          mount "$IMG_LOOP" /tmp/kairos-patch-img 2>/dev/null || { losetup -d "$IMG_LOOP"; umount /tmp/kairos-patch-state; continue; }
+          # Fix net.ifnames=1 -> net.ifnames=0 biosdevname=0
+          if [ -f /tmp/kairos-patch-img/etc/cos/bootargs.cfg ]; then
+            sed -i 's/net.ifnames=1/net.ifnames=0 biosdevname=0/' /tmp/kairos-patch-img/etc/cos/bootargs.cfg
+            echo "Patched bootargs in $IMG"
+          fi
+          # Add ifcfg-eth0
+          if [ -d /tmp/kairos-patch-img/etc/network/interfaces.d ] && [ ! -f /tmp/kairos-patch-img/etc/network/interfaces.d/ifcfg-eth0 ]; then
+            printf 'auto eth0\niface eth0 inet dhcp\n' > /tmp/kairos-patch-img/etc/network/interfaces.d/ifcfg-eth0
+            echo "Added ifcfg-eth0 in $IMG"
+          fi
+          umount /tmp/kairos-patch-img
+          losetup -d "$IMG_LOOP"
+          umount /tmp/kairos-patch-state
+        done
+        losetup -d "$LOOP"
+        rmdir /tmp/kairos-patch-state /tmp/kairos-patch-img 2>/dev/null || true
+      become: true
+
     - name: Trim sparse zeros
       ansible.builtin.shell: fallocate --dig-holes {{ build_dir }}/kairos-disk.raw
       failed_when: false
