@@ -17,9 +17,22 @@
         update_cache: true
         cache_valid_time: 3600
 
+    - name: Check if Docker is already installed
+      ansible.builtin.command: docker --version
+      register: docker_check
+      changed_when: false
+      failed_when: false
+
     - name: Install build dependencies (apt)
       ansible.builtin.apt:
-        name:
+        name: >-
+          {{
+            _base_packages
+            + ([] if docker_check.rc == 0 else ['docker.io'])
+          }}
+        state: present
+      vars:
+        _base_packages:
           # Ansible + SSH
           - ansible
           - sshpass
@@ -27,8 +40,6 @@
           - curl
           - jq
           - git
-          # Docker
-          - docker.io
           # QEMU / KVM
           - qemu-system-x86
           - qemu-utils
@@ -36,7 +47,7 @@
           - xorriso
           - cpio
           - gzip
-          - p7zip-full
+          - 7zip
           # FAT32 image tools
           - mtools
           - dosfstools
@@ -45,7 +56,6 @@
           - util-linux
           # Netcat (for QEMU serial console)
           - netcat-openbsd
-        state: present
 
 - name: Install packages (RedHat/Fedora)
   when: ansible_os_family == "RedHat"

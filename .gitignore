@@ -28,3 +28,6 @@ CanvOS/
 .bcm-prep.*
 
 proxmox.api.token
+
+# Ansible fact cache
+facts/
