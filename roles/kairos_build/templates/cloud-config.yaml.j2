@@ -41,10 +41,12 @@ stages:
     - name: "BCM integration: set NOSYNC + start cmd"
       commands:
         - |
-          for i in $(seq 1 30); do
-            ping -c1 -W2 {{ bcm_internal_ip }} >/dev/null 2>&1 && break
-            sleep 2
-          done
+          for i in $(seq 1 60); do
+            ip -4 addr show eth0 2>/dev/null | grep -q "inet " && \
+              ping -c1 -W2 {{ bcm_internal_ip }} >/dev/null 2>&1 && break
+            sleep 5
+          done || true
+          ping -c1 -W2 {{ bcm_internal_ip }} >/dev/null 2>&1 || exit 0
           NODE_MAC=$(ip route get 1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}' | xargs -I{} ip link show {} 2>/dev/null | awk '/ether/{print $2}')
           export NODE_NAME=$(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               -o ConnectTimeout=10 -o LogLevel=ERROR -i /var/lib/bcm/bcm-key \
