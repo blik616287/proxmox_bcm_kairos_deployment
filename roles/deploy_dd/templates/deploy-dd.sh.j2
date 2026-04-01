@@ -77,7 +77,7 @@ if grep -q 'not authoritative' /etc/dhcpd.conf 2>/dev/null; then
     sed -i 's/not authoritative/authoritative/' /etc/dhcpd.conf
 fi
 {% if bcm_external_gateway is defined %}
-sed -i 's/option routers .*/option routers                {{ bcm_external_gateway }};/' /etc/dhcpd.conf
+# BCM acts as NAT gateway for managed nodes — do not override DHCP routers
 {% endif %}
 # Exclude BCM's own IPs from DHCP pool
 {% if bcm_internal_ip is defined %}
@@ -85,6 +85,25 @@ POOL_END=$(echo "{{ bcm_internal_ip }}" | awk -F. '{printf "%s.%s.%s.%d", $1,$2,
 sed -i "s/range .*/range 10.100.0.16 ${POOL_END};/" /etc/dhcpd.conf
 {% endif %}
 systemctl restart dhcpd
+
+# Policy routing: if both BCM NICs share the same subnet, NAT'd reply
+# packets arriving on the external NIC get routed back out the wrong
+# interface. Fix by forcing correct interface selection.
+INT_NET=$(ip -4 -o addr show eth0 2>/dev/null | awk '{print $4}')
+EXT_NET=$(ip -4 -o addr show eth1 2>/dev/null | awk '{print $4}')
+if [ -n "$INT_NET" ] && [ -n "$EXT_NET" ]; then
+    INT_PREFIX=$(ipcalc -n "$INT_NET" 2>/dev/null | grep Network | awk '{print $2}')
+    EXT_PREFIX=$(ipcalc -n "$EXT_NET" 2>/dev/null | grep Network | awk '{print $2}')
+    if [ "$INT_PREFIX" = "$EXT_PREFIX" ]; then
+        echo "[INFO] Internal and external NICs share subnet $INT_PREFIX — enabling policy routing"
+        iptables -t mangle -C PREROUTING -i eth0 ! -d {{ bcm_internal_cidr }} -j MARK --set-mark 100 2>/dev/null || \
+            iptables -t mangle -A PREROUTING -i eth0 ! -d {{ bcm_internal_cidr }} -j MARK --set-mark 100
+        ip rule list | grep -q "fwmark 0x64 lookup 100" || ip rule add fwmark 100 table 100 priority 100
+        ip route replace default via {{ bcm_external_gateway }} dev eth1 table 100
+        ip rule list | grep -q "iif eth1 lookup 101" || ip rule add iif eth1 table 101 priority 101
+        ip route replace {{ bcm_internal_cidr }} dev eth0 table 101
+    fi
+fi
 
 # Ensure rsyncd is running for image provisioning
 cat > /etc/rsyncd.conf << 'RCONF'
