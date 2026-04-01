@@ -58,6 +58,20 @@ palette_project_uid: "68e6a683b6b66c6045d1b584"
 kairos_kernel_version: "6.8.0-87-generic"
 kairos_container_registry: "ttl.sh"
 
+# --- Proxmox testbed (used by proxmox submodule playbooks) ---
+proxmox_root_password: "{{ proxmox_api_password }}"
+proxmox_api_port: 8006
+libvirt_net_gateway: "10.100.0.1"
+template_name: "ubuntu-cloud-template"
+template_vmid: 9000
+guest_default_user: "ubuntu"
+guest_default_password: "ubuntu"
+guest_ssh_public_key: "{{ lookup('file', '~/.ssh/id_rsa.pub', errors='ignore') | default('', true) }}"
+proxmox_vm_name: "proxmox-ve"
+proxmox_vm_disk_path: "/var/lib/libvirt/images/proxmox-ve.qcow2"
+libvirt_net_name: "proxmox-testbed"
+guest_vms: []
+
 # --- Paths ---
 e2e_dir: "{{ playbook_dir | default('.') }}/.."
 build_dir: "{{ e2e_dir }}/build"

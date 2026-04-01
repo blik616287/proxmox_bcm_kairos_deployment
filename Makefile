@@ -65,8 +65,13 @@ orchestrate: ## Run full end-to-end pipeline (all stages)
 	$(call run-playbook,site.yml)
 
 .PHONY: proxmox-up
-proxmox-up: ## Stage 0: Stand up Proxmox testbed (skipped if API reachable)
+proxmox-up: ## Stage 0: Stand up Proxmox testbed + dual-NIC VM (skipped if API reachable)
 	$(call run-playbook,00-proxmox-up.yml)
+
+.PHONY: proxmox-down
+proxmox-down: ## Tear down the Proxmox testbed VM and libvirt network
+	@mkdir -p $(LOG_DIR)
+	ansible-playbook proxmox/playbooks/teardown.yml $(ANSIBLE_ARGS) 2>&1 | tee $(LOG_DIR)/proxmox-teardown.log
 
 .PHONY: create-vmbr1
 create-vmbr1: ## Stage 1: Create internal bridge (vmbr1) in Proxmox

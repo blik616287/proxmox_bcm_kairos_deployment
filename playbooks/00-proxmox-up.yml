@@ -57,3 +57,6 @@
       ansible.builtin.include_role:
         name: proxmox_configure
       when: not proxmox_already_running
+
+- name: Create dual-NIC VM in Proxmox
+  import_playbook: ../proxmox/playbooks/05-dual-nic-vm.yml
