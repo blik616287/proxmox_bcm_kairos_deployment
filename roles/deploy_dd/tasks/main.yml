@@ -2,14 +2,14 @@
 # deploy_dd — Upload raw image to BCM, configure installer + kairos category.
 # Runs on localhost. Requires BCM VM IP in build/.bcm-ip.
 
-- name: Read BCM VM IP
-  ansible.builtin.slurp:
-    src: "{{ build_dir }}/.bcm-ip"
-  register: bcm_ip_file
-
 - name: Set BCM IP fact
   ansible.builtin.set_fact:
-    bcm_vm_ip: "{{ bcm_ip_file.content | b64decode | trim }}"
+    bcm_vm_ip: "{{ bcm_connect_ip }}"
+
+- name: Verify BCM IP is set
+  ansible.builtin.assert:
+    that: bcm_vm_ip | length > 0
+    fail_msg: "bcm_connect_ip not set — run Stage 3 or set it in group_vars"
 
 - name: Verify raw disk image exists
   ansible.builtin.stat:

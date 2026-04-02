@@ -1,20 +1,13 @@
 ---
 # Stage 3 (API variant): Deploy BCM head node via Proxmox API.
 # Use this when SSH to the Proxmox host is not available.
-# Requires: proxmox_api_token_id + proxmox_api_token_secret in all.yml
+# Loads cached deployment facts from Stage 0, falls back to group_vars.
 
 - name: Manage BCM head node VM (API)
   hosts: localhost
   gather_facts: true
   pre_tasks:
-    - name: Apply testbed facts if available
-      ansible.builtin.set_fact:
-        proxmox_api_host: "{{ testbed_proxmox_api_host }}"
-        proxmox_api_user: "{{ testbed_proxmox_api_user }}"
-        proxmox_api_password: "{{ testbed_proxmox_api_password }}"
-        proxmox_api_token_id: "{{ testbed_proxmox_api_token_id.split('!')[-1] }}"
-        proxmox_api_token_secret: "{{ testbed_proxmox_api_token_secret }}"
-        proxmox_node: "{{ testbed_proxmox_node }}"
-      when: testbed_proxmox_api_host is defined
+    - name: Load deployment facts
+      ansible.builtin.include_tasks: load-deploy-facts.yml
   roles:
     - bcm_vm_api

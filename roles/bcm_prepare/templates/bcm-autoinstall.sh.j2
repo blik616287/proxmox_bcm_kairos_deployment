@@ -257,7 +257,7 @@ echo "=========================================="
 echo " Running cm-master-install"
 echo "=========================================="
 cd /cm
-yes | perl ./cm-master-install --config /cm/build-config.xml --mountpath /mnt/cdrom --password "$PASS" --autoreboot 2>&1 | tee -a "$LOG"
+yes | perl ./cm-master-install --config /cm/build-config.xml --mountpath /mnt/cdrom --password "$PASS" 2>&1 | tee -a "$LOG"
 RETVAL=${PIPESTATUS[1]}
 if [ $RETVAL -ne 0 ]; then
     echo " INSTALLATION FAILED (exit code: $RETVAL)"; exit $RETVAL
@@ -311,5 +311,6 @@ else
     echo "[WARN] Could not find installed root partition"
 fi
 echo "=========================================="
-echo " INSTALLATION COMPLETE - rebooting..."
+echo " INSTALLATION COMPLETE - powering off..."
 echo "=========================================="
+poweroff
