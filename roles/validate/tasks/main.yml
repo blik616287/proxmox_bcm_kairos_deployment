@@ -12,10 +12,15 @@
     mode: "0755"
 
 - name: Run validation
-  ansible.builtin.shell: "{{ build_dir }}/validate.sh"
+  ansible.builtin.shell: "{{ build_dir }}/validate.sh 2>&1 | tee {{ build_dir }}/validate.log"
   register: validate_result
   failed_when: false
 
-- name: Show validation output
+- name: Print validation results
   ansible.builtin.debug:
     msg: "{{ validate_result.stdout_lines }}"
+
+- name: Validation failed
+  ansible.builtin.fail:
+    msg: "Validation had failures — check build/validate.log"
+  when: validate_result.rc != 0

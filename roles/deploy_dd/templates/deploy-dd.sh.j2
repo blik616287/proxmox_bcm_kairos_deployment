@@ -54,6 +54,21 @@ while true; do
 done
 info "BCM services ready"
 
+# Configure DNS forwarders via cmsh so it persists across BCM config regeneration
+${SSH_CMD} "echo -e 'partition\nuse base\nset nameservers {{ bcm_external_dns }}\ncommit' | cmsh 2>&1 && systemctl restart named 2>/dev/null" 2>/dev/null || true
+info "DNS forwarders set to {{ bcm_external_dns }} (via cmsh)"
+
+# Enable IP forwarding + NAT if both NICs share a subnet (compute nodes route through BCM)
+{% if bcm_internal_bridge == bcm_external_bridge %}
+${SSH_CMD} "
+echo 1 > /proc/sys/net/ipv4/ip_forward
+sysctl -w net.ipv4.ip_forward=1 > /dev/null
+grep -q 'net.ipv4.ip_forward=1' /etc/sysctl.conf || echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
+iptables -t nat -C POSTROUTING -o eth1 -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o eth1 -j MASQUERADE
+" 2>/dev/null || true
+info "IP forwarding and NAT enabled (single-bridge topology)"
+{% endif %}
+
 ${SSH_CMD} "command -v sshpass >/dev/null 2>&1 || apt-get install -y -qq sshpass >/dev/null 2>&1" 2>/dev/null || true
 
 # SSH key pair
@@ -252,10 +267,9 @@ cmsh -c "partition; use base; set nodebasename node; set nodedigits 3; commit" 2
 
 EOF
 
-# Register node: always use explicit IP to avoid BCM auto-assigning the gateway
+# Register node: always remove and re-add with explicit IP to avoid BCM auto-assigning the gateway
 COMPUTE_NODE_IP="{{ bcm_internal_ip.rsplit('.', 1)[0] }}.10"
-${SSH_CMD} "cmsh -c 'device; use node001' 2>/dev/null && \
-    echo -e 'device\nuse node001\nset mac ${COMPUTE_MAC}\nset category kairos\ncommit' | cmsh 2>&1 || \
+${SSH_CMD} "echo -e 'device\nremove node001\ncommit' | cmsh 2>/dev/null; \
     echo -e 'device\nadd physicalnode node001 ${COMPUTE_NODE_IP} eth0\nset category kairos\nset mac ${COMPUTE_MAC}\ncommit' | cmsh 2>&1" 2>/dev/null | filter_motd
 
 ${SSH_CMD} << 'EOF' | filter_motd

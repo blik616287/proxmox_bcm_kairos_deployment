@@ -7,13 +7,12 @@ Automated end-to-end pipeline that stands up a Proxmox VE environment, deploys a
 | Stage | Make Target | Description |
 |-------|-------------|-------------|
 | 0 | `make proxmox-up` | Stand up Proxmox VE testbed (skipped if API already reachable) |
-| 1 | `make create-vmbr1` | Create internal bridge (`vmbr1`) — optional, only for dual-bridge setups |
-| 2 | `make bcm-prepare` | Download BCM ISO from JFrog, patch rootfs for unattended install, remaster ISO |
-| 3 | `make bcm-vm-create-api` | Create BCM head node VM via Proxmox API, install, power off, boot from disk |
-| 4 | `make kairos-build` | Build Kairos ISO via CanvOS + generate raw disk image in local QEMU |
-| 5 | `make deploy-dd` | Upload lz4-compressed raw image to BCM, configure installer + PXE |
-| 6 | `make kairos-vm-create` | Create Kairos compute VM in Proxmox (PXE boot from BCM) |
-| 7 | `make validate` | Run validation checks against the Kairos node through BCM jump host |
+| 1 | `make bcm-prepare` | Download BCM ISO from JFrog, patch rootfs for unattended install, remaster ISO |
+| 2 | `make bcm-vm-create-api` | Create BCM head node VM via Proxmox API, install, power off, boot from disk |
+| 3 | `make kairos-build` | Build Kairos ISO via CanvOS + generate raw disk image in local QEMU |
+| 4 | `make deploy-dd` | Upload lz4-compressed raw image to BCM, configure installer + PXE |
+| 5 | `make kairos-vm-create` | Create Kairos compute VM in Proxmox (PXE boot from BCM) |
+| 6 | `make validate` | Run validation checks against the Kairos node through BCM jump host |
 
 ## Quick Start — Full E2E Deployment
 
@@ -74,18 +73,18 @@ If `proxmox_api_host` points to an existing Proxmox server, Stage 0 is automatic
 
 ```bash
 make proxmox-up           # Stage 0: Proxmox testbed + dual-NIC VM
-make bcm-prepare           # Stage 2: Remaster BCM ISO
-make bcm-vm-create-api     # Stage 3: Install BCM (API-only, no SSH to Proxmox)
-make kairos-build          # Stage 4: Build Kairos image
-make deploy-dd             # Stage 5: Deploy to BCM
-make kairos-vm-create      # Stage 6: PXE boot Kairos VM
-make validate              # Stage 7: Validate
+make bcm-prepare           # Stage 1: Remaster BCM ISO
+make bcm-vm-create-api     # Stage 2: Install BCM (API-only, no SSH to Proxmox)
+make kairos-build          # Stage 3: Build Kairos image
+make deploy-dd             # Stage 4: Deploy to BCM
+make kairos-vm-create      # Stage 5: PXE boot Kairos VM
+make validate              # Stage 6: Validate
 ```
 
 To run a single stage:
 ```bash
-make bcm-prepare        # just Stage 2
-make kairos-build       # just Stage 4
+make bcm-prepare        # just Stage 1
+make kairos-build       # just Stage 3
 ```
 
 Monitor progress in real-time — output is displayed on screen and logged to `logs/`.
@@ -113,7 +112,7 @@ make clean-all     # Both of the above
 Uses the Proxmox API for all VM operations — no SSH access to the Proxmox host required:
 
 ```bash
-make bcm-vm-create-api     # Stage 3 via API
+make bcm-vm-create-api     # Stage 2 via API
 ```
 
 Stage 0 creates an API token (`root@pam!ansible`) and caches the credentials as persistent Ansible facts in `facts/`. All downstream stages load these facts automatically.
@@ -123,12 +122,12 @@ Stage 0 creates an API token (`root@pam!ansible`) and caches the credentials as 
 Uses SSH + `qm` commands on the Proxmox host:
 
 ```bash
-make bcm-vm-create         # Stage 3 via SSH
+make bcm-vm-create         # Stage 2 via SSH (legacy)
 ```
 
 ### Single-bridge topology
 
-When both BCM NICs are on the same bridge (e.g., `vmbr0` with VLAN tags), Stage 1 (`create-vmbr1`) is not needed. Set in `group_vars/all`:
+Both BCM NICs use the same bridge (`vmbr0`). Set in `group_vars/all`:
 
 ```yaml
 bcm_internal_bridge: vmbr0
@@ -145,7 +144,7 @@ Stage 0 caches deployment configuration as Ansible facts in `facts/` (jsonfile c
 
 Facts are cached with `cacheable: true` and persist across playbook runs. To reset, delete `facts/` and re-run Stage 0.
 
-## Kairos Deployment Flow (Stage 5-6 Detail)
+## Kairos Deployment Flow (Stage 4-5 Detail)
 
 The Kairos deployment uses BCM's PXE provisioning with a dd-based disk image installer:
 
@@ -254,7 +253,7 @@ BCM uses `net.ifnames=0 biosdevname=0` for classic NIC naming (`eth0`, `eth1`).
 Forward flags to `ansible-playbook` via `ANSIBLE_ARGS`:
 
 ```bash
-make orchestrate ANSIBLE_ARGS="-v"                           # verbose
+make bcm-vm-create-api ANSIBLE_ARGS="-v"                     # verbose
 make bcm-vm-create-api ANSIBLE_ARGS="--tags create"          # run specific tags
 make proxmox-up ANSIBLE_ARGS="-e proxmox_api_host=10.0.0.5"  # override a variable
 ```
@@ -263,16 +262,14 @@ make proxmox-up ANSIBLE_ARGS="-e proxmox_api_host=10.0.0.5"  # override a variab
 
 ```bash
 # Pipeline stages
-make orchestrate          # Full end-to-end pipeline
 make proxmox-up           # Stage 0: Proxmox testbed
-make create-vmbr1         # Stage 1: Internal bridge (optional)
-make bcm-prepare          # Stage 2: BCM ISO
-make bcm-vm-create-api    # Stage 3: BCM VM (API)
-make bcm-vm-create        # Stage 3: BCM VM (SSH, legacy)
-make kairos-build         # Stage 4: Kairos image
-make deploy-dd            # Stage 5: Deploy to BCM
-make kairos-vm-create     # Stage 6: Kairos VM (Proxmox)
-make validate             # Stage 7: Validation
+make bcm-prepare          # Stage 1: BCM ISO
+make bcm-vm-create-api    # Stage 2: BCM VM (API)
+make bcm-vm-create        # Stage 2: BCM VM (SSH, legacy)
+make kairos-build         # Stage 3: Kairos image
+make deploy-dd            # Stage 4: Deploy to BCM
+make kairos-vm-create     # Stage 5: Kairos VM
+make validate             # Stage 6: Validation
 
 # Local testing
 make kairos-local         # Launch local QEMU via VXLAN
