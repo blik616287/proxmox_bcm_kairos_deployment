@@ -196,29 +196,22 @@
       delegate_to: localhost
       timeout: 660
 
-    - name: Wait for BCM install to complete (monitor disk writes, up to 4 hours)
+    - name: Wait for BCM install to complete (VM powers off when done, up to 4 hours)
       ansible.builtin.shell: |
         TIMEOUT=14400
         ELAPSED=0
-        PREV_WRITES=0
-        STABLE_COUNT=0
         API_URL="{{ pve_api_url }}/api2/json/nodes/{{ proxmox_node }}/qemu/{{ bcm_vmid }}/status/current"
         AUTH="{{ pve_auth_header }}"
-        echo "Monitoring disk writes via API..."
+        echo "Waiting for VM to power off after install..."
         while [ $ELAPSED -lt $TIMEOUT ]; do
-          WRITES=$(curl -sk -H "Authorization: $AUTH" "$API_URL" 2>/dev/null | \
-            python3 -c "import sys,json; print(json.load(sys.stdin)['data'].get('diskwrite',0))" 2>/dev/null || echo 0)
-          echo "Waiting... ${ELAPSED}s writes=${WRITES}"
-          if [ "$WRITES" = "$PREV_WRITES" ] && [ "${WRITES:-0}" -gt 1000000000 ]; then
-            STABLE_COUNT=$((STABLE_COUNT + 1))
-            if [ $STABLE_COUNT -ge 3 ]; then
-              echo "INSTALL_DONE: writes stable at ${WRITES} for 90s (${ELAPSED}s total)"
-              exit 0
-            fi
-          else
-            STABLE_COUNT=0
+          RESULT=$(curl -sk -H "Authorization: $AUTH" "$API_URL" 2>/dev/null)
+          STATUS=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['data'].get('status',''))" 2>/dev/null)
+          WRITES=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['data'].get('diskwrite',0))" 2>/dev/null || echo 0)
+          echo "Waiting... ${ELAPSED}s status=${STATUS} writes=${WRITES}"
+          if [ "$STATUS" = "stopped" ]; then
+            echo "INSTALL_DONE: VM powered off at ${ELAPSED}s (writes=${WRITES})"
+            exit 0
           fi
-          PREV_WRITES="$WRITES"
           sleep 30
           ELAPSED=$((ELAPSED + 30))
         done

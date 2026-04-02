@@ -32,6 +32,6 @@
 - name: Run deploy-dd script
   ansible.builtin.shell: "{{ build_dir }}/deploy-dd.sh"
   environment:
-    PATH: "{{ ansible_env.PATH }}"
+    PATH: "{{ ansible_facts['env']['PATH'] }}"
   async: 3600
   poll: 15
