@@ -31,10 +31,11 @@
       --cores {{ kairos_vm_cores }} \
       --bios seabios \
       --net0 virtio={{ kairos_vm_mac }},bridge={{ bcm_internal_bridge }} \
-      --virtio0 local-lvm:{{ kairos_vm_disk_size | regex_replace('G$', '') }},format=raw \
+      --virtio0 {{ proxmox_storage | default('local-lvm') }}:{{ kairos_vm_disk_size | regex_replace('G$', '') }},format=raw \
       --boot order='virtio0;net0' \
       --ostype l26 \
-      --args '-chardev file,id=serial0,path=/var/log/e2e/kairos-serial.log -serial chardev:serial0'
+      --vga std \
+      --serial0 socket
 
 - name: Start Kairos VM
   tags: [create]
@@ -54,17 +55,10 @@
 
 # ---- Wait for Kairos to boot ----
 
-- name: Read BCM VM IP
-  tags: [create]
-  ansible.builtin.slurp:
-    src: "{{ build_dir }}/.bcm-ip"
-  register: bcm_ip_file
-  delegate_to: localhost
-
 - name: Set BCM IP fact
   tags: [create]
   ansible.builtin.set_fact:
-    bcm_vm_ip: "{{ bcm_ip_file.content | b64decode | trim }}"
+    bcm_vm_ip: "{{ bcm_connect_ip }}"
 
 - name: Render Kairos boot wait script
   tags: [create]
@@ -85,6 +79,38 @@
   tags: [create]
   ansible.builtin.debug:
     msg: "{{ kairos_boot_result.stdout_lines | default(['unknown']) | last }}"
+
+- name: Capture debug output
+  tags: [create, debug]
+  block:
+    - name: Capture VGA screendump
+      ansible.builtin.shell: |
+        echo "screendump /tmp/kairos-vga.ppm" | qm monitor {{ kairos_vmid }} 2>/dev/null
+        sleep 1
+        [ -f /tmp/kairos-vga.ppm ] && cp /tmp/kairos-vga.ppm /var/log/e2e/kairos-vga.ppm
+      changed_when: false
+      failed_when: false
+
+    - name: Fetch serial log to build host
+      ansible.builtin.fetch:
+        src: /var/log/e2e/kairos-serial.log
+        dest: "{{ build_dir }}/kairos-serial.log"
+        flat: true
+      failed_when: false
+
+    - name: Fetch VGA screendump to build host
+      ansible.builtin.fetch:
+        src: /var/log/e2e/kairos-vga.ppm
+        dest: "{{ build_dir }}/kairos-vga.ppm"
+        flat: true
+      failed_when: false
+
+    - name: Debug output locations
+      ansible.builtin.debug:
+        msg:
+          - "Serial log: {{ build_dir }}/kairos-serial.log"
+          - "VGA capture: {{ build_dir }}/kairos-vga.ppm"
+          - "On Proxmox: /var/log/e2e/kairos-serial.log"
 
 # ---- Stop / Destroy ----
 

@@ -1,17 +1,23 @@
 ---
 # Create and boot Kairos compute node VM in Proxmox.
-# The VM PXE boots from BCM on the internal bridge (vmbr1).
-#
-# Prerequisites:
-#   - BCM head node running and configured (playbook 02 + deploy-dd)
-#   - vmbr1 internal bridge exists
-#
-# Usage:
-#   ansible-playbook playbooks/03-kairos-vm.yml               # Create + start
-#   ansible-playbook playbooks/03-kairos-vm.yml --tags stop    # Stop VM
+# The VM PXE boots from BCM on the internal bridge.
+
+- name: Load deployment facts
+  hosts: localhost
+  gather_facts: true
+  tasks:
+    - name: Load deployment facts
+      ansible.builtin.include_tasks: load-deploy-facts.yml
 
 - name: Manage Kairos compute node VM
   hosts: proxmox
   gather_facts: false
+  vars:
+    ansible_host: "{{ hostvars['localhost']['proxmox_api_host'] | default(proxmox_api_host) }}"
+    ansible_user: root
+    ansible_password: "{{ hostvars['localhost']['proxmox_api_password'] | default(proxmox_api_password) }}"
+    bcm_connect_ip: "{{ hostvars['localhost']['bcm_connect_ip'] | default(bcm_internal_ip) }}"
+    bcm_internal_bridge: "{{ hostvars['localhost']['bcm_internal_bridge'] | default('vmbr0') }}"
+    proxmox_storage: "{{ hostvars['localhost']['proxmox_storage'] | default('local-lvm') }}"
   roles:
     - kairos_vm
