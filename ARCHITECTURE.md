@@ -6,12 +6,12 @@ This pipeline deploys a complete HPC stack inside a nested virtualization enviro
 
 ```
 Physical Host (Ubuntu 24.04, KVM)
-  └── libvirt VM: Proxmox VE 8.4 (10.100.0.2)
-        ├── VM 200: BCM 11.0 Head Node (dual-NIC)
-        │     ├── eth0: vmbr1 (10.141.255.254) — internal provisioning
-        │     └── eth1: vmbr0 (DHCP)            — external access
+  └── libvirt VM: Proxmox VE 8.4 (10.100.0.2, virbr-pve bridge)
+        ├── VM 200: BCM 11.0 Head Node (dual-NIC, both on vmbr0)
+        │     ├── eth0: vmbr0 (10.100.0.200) — internal provisioning
+        │     └── eth1: vmbr0 (10.100.0.201) — external access
         └── VM 201: Kairos Compute Node
-              └── eth0: vmbr1 (10.141.x.x)      — PXE boot from BCM
+              └── eth0: vmbr0 (10.100.0.10)  — PXE boot from BCM
 ```
 
 The pipeline has 8 sequential stages, each implemented as an Ansible playbook backed by a role.
@@ -48,7 +48,7 @@ The pipeline has 8 sequential stages, each implemented as an Ansible playbook ba
    - Patches `grub.cfg`: sets timeout=0, adds `proxmox-start-auto-installer` and serial console args
    - Extracts MBR from original ISO
    - Rebuilds ISO with `xorriso` preserving boot sectors
-3. Creates a QCOW2 disk (500 GB thin-provisioned)
+3. Creates a QCOW2 disk (`proxmox_vm_disk_size`, default 700 GB — thin-provisioned on host)
 4. Defines and boots a libvirt VM with the remastered ISO
 5. Monitors serial log for "Installation finished" / "SUCCESS"
 6. Re-defines VM for disk boot (removes ISO), starts from disk
@@ -77,7 +77,7 @@ The pipeline has 8 sequential stages, each implemented as an Ansible playbook ba
    ```
    auto vmbr1
    iface vmbr1 inet static
-       address 10.141.255.254/16
+       address 10.100.0.200/16
        bridge-ports none       # virtual-only mode
        bridge-stp off
        bridge-fd 0
@@ -86,11 +86,13 @@ The pipeline has 8 sequential stages, each implemented as an Ansible playbook ba
 4. Brings up vmbr1 with `ifup`
 5. Verifies the bridge is active
 
-**Network topology after this stage**:
+**Network topology after this stage** (dual-bridge mode):
 ```
 vmbr0 (external)  ← Proxmox management + internet
-vmbr1 (internal)  ← 10.141.0.0/16, no physical uplink (VM-to-VM only)
+vmbr1 (internal)  ← provisioning, no physical uplink (VM-to-VM only)
 ```
+
+> **Note**: Stage 1 is optional. In single-bridge mode (testbed), both BCM NICs use `vmbr0` on `10.100.0.0/24` and Stage 1 is skipped.
 
 ---
 
@@ -112,7 +114,7 @@ vmbr1 (internal)  ← 10.141.0.0/16, no physical uplink (VM-to-VM only)
 7. Unmounts ISO
 
 #### Rootfs Patching
-8. Decompresses rootfs.cgz via `gunzip` + `cpio -id` into a working directory
+8. Decompresses rootfs.cgz via `lz4 -d` + `cpio -id` into a working directory
 9. Patches `build-config.xml` inside the rootfs:
    - Sets hostname to `bcm_hostname` (e.g., `bcm11-headnode`)
    - Sets timezone to `bcm_timezone` (e.g., `America/Los_Angeles`)
@@ -168,11 +170,15 @@ vmbr1 (internal)  ← 10.141.0.0/16, no physical uplink (VM-to-VM only)
 
 ---
 
-## Stage 3: BCM VM Deployment (`03-bcm-vm.yml`)
+## Stage 3: BCM VM Deployment
+
+Two deployment modes:
+- **API-only** (`03-bcm-vm-api.yml` / `make bcm-vm-create-api`): Uses Proxmox API — no SSH to Proxmox host required. Recommended.
+- **SSH-based** (`03-bcm-vm.yml` / `make bcm-vm-create`): Uses SSH + `qm` commands. Legacy.
 
 **Purpose**: Create the BCM head node VM, install BCM unattended, discover its IP, and wait for first-boot configuration.
 
-### Role: `bcm_vm`
+### Role: `bcm_vm_api` (API path) / `bcm_vm` (SSH path)
 
 #### Artifact Upload
 1. Uploads to Proxmox via `ansible.builtin.copy`:
@@ -185,8 +191,8 @@ vmbr1 (internal)  ← 10.141.0.0/16, no physical uplink (VM-to-VM only)
 2. Creates VM 200 with:
    ```
    --memory 8192 --cores 4 --bios seabios
-   --net0 virtio=<mac>,bridge=vmbr1    # internal (eth0)
-   --net1 virtio=<mac>,bridge=vmbr0    # external (eth1)
+   --net0 virtio=<mac>,bridge=vmbr0    # internal (eth0)
+   --net1 e1000=<mac>,bridge=vmbr0    # external (eth1)
    --scsi0 local-lvm:100,format=raw    # 100 GB thin-provisioned LVM
    --scsihw virtio-scsi-pci
    --ide2 local:iso/<bcm.iso>,media=cdrom
@@ -228,7 +234,7 @@ vmbr1 (internal)  ← 10.141.0.0/16, no physical uplink (VM-to-VM only)
      - Step 12: Create node installer NFS image
      - Step 13: Finalize installation
      - Step 14: Initialize management daemon
-   - Fixes GRUB, triggers reboot
+   - Fixes GRUB, calls `poweroff` (not reboot)
 6. **Disk write monitoring**: Instead of using a fixed timeout, monitors `qm status 200 --verbose | grep diskwrite`:
    - First waits for writes to exceed 10 MB (installer has started)
    - Then polls every 30 seconds, comparing write totals
@@ -245,11 +251,11 @@ vmbr1 (internal)  ← 10.141.0.0/16, no physical uplink (VM-to-VM only)
 9. Starts VM from disk — GRUB in the installed OS takes over
 
 #### IP Discovery
-10. Adds temporary IP `10.141.0.1/16` on `vmbr1` so Proxmox host can reach BCM's internal IP
-11. Waits for SSH on `10.141.255.254` (BCM's internal eth0)
+10. Adds temporary IP `10.100.0.1/24` on `vmbr1` so Proxmox host can reach BCM's internal IP
+11. Waits for SSH on `10.100.0.200` (BCM's internal eth0)
 12. Discovers external IP by SSH'ing to BCM and reading eth1's IP:
     ```bash
-    ssh root@10.141.255.254 "ip -4 addr show eth1 | grep -oP 'inet \K[0-9.]+'"
+    ssh root@10.100.0.200 "ip -4 addr show eth1 | grep -oP 'inet \K[0-9.]+'"
     ```
 13. Saves external IP to `build/.bcm-ip` (read by stages 5, 6, 7)
 
@@ -364,7 +370,7 @@ vmbr1 (internal)  ← 10.141.0.0/16, no physical uplink (VM-to-VM only)
 |------|-------------|-------------|---------|
 | `build/palette-edge-installer.iso` | ~1 GB | ~1 GB | Kairos installer ISO |
 | `build/kairos-disk.raw` | 80 GB | 8.8 GB | Bootable disk image (sparse) |
-| `build/kairos-disk.raw.gz` | — | 1.6 GB | Compressed for transfer |
+| `build/kairos-disk.raw.lz4` | — | 1.6 GB | Compressed for transfer |
 | `build/cloud-config.yaml` | — | ~10 KB | Kairos first-boot config |
 | `build/bcm-kairos-key` | — | ~400 B | ED25519 SSH keypair |
 
@@ -383,12 +389,12 @@ vmbr1 (internal)  ← 10.141.0.0/16, no physical uplink (VM-to-VM only)
 3. Executes `deploy-dd.sh` which performs 7 steps on BCM:
 
 #### Step 1: Upload Image
-- Compresses raw image: `gzip -c kairos-disk.raw > kairos-disk.raw.gz` (80 GB → 1.6 GB)
-- Uploads via scp to BCM: `scp kairos-disk.raw.gz root@<bcm>:/cm/shared/kairos/disk.raw.gz`
+- Compresses raw image: `gzip -c kairos-disk.raw > kairos-disk.raw.lz4` (80 GB → 1.6 GB)
+- Uploads via scp to BCM: `scp kairos-disk.raw.lz4 root@<bcm>:/cm/shared/kairos/disk.raw.lz4`
 
 #### Step 2: HTTP Server
 - Creates a systemd service on BCM running `python3 -m http.server 8888` in `/cm/shared/kairos/`
-- The compute node will download the image from `http://10.141.255.254:8888/disk.raw.gz`
+- The compute node will download the image from `http://10.100.0.200:8888/disk.raw.lz4`
 - Verifies server is responding with `curl --head`
 
 #### Step 3: Software Image
@@ -443,13 +449,13 @@ vmbr1 (internal)  ← 10.141.0.0/16, no physical uplink (VM-to-VM only)
 This script runs inside the NFS-booted `kairos-installer` environment on the compute node:
 
 1. **Discovers target disk**: `lsblk -ndo NAME,TYPE | awk '$2=="disk"'` → `/dev/sda`
-2. **Waits for HTTP server**: Polls `http://10.141.255.254:8888/disk.raw.gz` until reachable
+2. **Waits for HTTP server**: Polls `http://10.100.0.200:8888/disk.raw.lz4` until reachable
 3. **Stages binaries to RAM** (`/dev/shm/kinstall/`):
-   - Copies `bash`, `curl`, `gunzip`, `dd`, `sync`, `reboot`, `sleep` and all their shared libraries
+   - Copies `bash`, `curl`, `lz4 -d`, `dd`, `sync`, `reboot`, `sleep` and all their shared libraries
    - This is critical because `dd` is about to overwrite the disk that the OS is running from (NFS root → disk write → disk now has Kairos, old NFS filesystem is irrelevant)
 4. **Creates `run-dd.sh`** in RAM:
    ```bash
-   curl --fail -s http://10.141.255.254:8888/disk.raw.gz | gunzip | dd of=/dev/sda bs=16M conv=fsync
+   curl --fail -s http://{bcm_ip}:8888/disk.raw.lz4 | lz4 -d - - | dd of=/dev/vda bs=4M oflag=direct
    sync
    echo s > /proc/sysrq-trigger  # emergency sync
    echo b > /proc/sysrq-trigger  # emergency reboot
@@ -484,13 +490,13 @@ This script runs inside the NFS-booted `kairos-installer` environment on the com
 3. **Boot sequence**:
    ```
    Empty disk → PXE boot from BCM (via vmbr1)
-     → DHCP from BCM (10.141.x.x)
+     → DHCP from BCM (10.100.0.x)
      → TFTP: pxelinux.0 → kernel + initrd
      → NFS root: kairos-installer image
      → systemd starts kairos-install.service
      → install-kairos.sh stages binaries to RAM
-     → curl | gunzip | dd writes kairos-disk.raw to /dev/sda
-     → sysrq reboot
+     → curl | lz4 -d | dd writes kairos-disk.raw to /dev/sda
+     → sysrq poweroff (echo o > /proc/sysrq-trigger)
      → GRUB on /dev/sda boots Kairos
      → Kairos runs cloud-config (users, SSH, Palette agent)
      → K3s starts, node registers with Palette
@@ -550,14 +556,14 @@ Proxmox VE
 │     ├── BCM eth1 (DHCP from virbr-pve)
 │     └── Internet access
 │
-└── vmbr1 (internal, 10.141.0.0/16, no physical uplink)
-      ├── BCM eth0 (10.141.255.254, static)
+└── vmbr1 (internal, 10.100.0.0/24, no physical uplink)
+      ├── BCM eth0 (10.100.0.200, static)
       │     ├── DHCP server (for compute nodes)
       │     ├── TFTP server (PXE boot)
       │     ├── NFS server (/cm/images, /cm/shared)
       │     └── HTTP server (:8888, disk image)
       │
-      └── Kairos eth0 (10.141.x.x, DHCP from BCM)
+      └── Kairos eth0 (10.100.0.x, DHCP from BCM)
             └── PXE boot client
 ```
 
@@ -568,8 +574,8 @@ Proxmox VE
 - NIC order matters for BCM's provisioning setup
 
 ### IP Discovery Flow
-1. Proxmox adds temporary `10.141.0.1/16` on vmbr1
-2. SSH from Proxmox → BCM at `10.141.255.254` (internal)
+1. Proxmox adds temporary `10.100.0.1/24` on vmbr1
+2. SSH from Proxmox → BCM at `10.100.0.200` (internal)
 3. On BCM: `ip -4 addr show eth1 | grep -oP 'inet \K[0-9.]+'` → external IP
 4. External IP saved to `build/.bcm-ip`
 5. All subsequent access uses external IP (reachable from host)
@@ -643,10 +649,10 @@ Direct kernel boot (`-kernel` + `-initrd`) bypasses the ISO bootloader entirely.
 The Kairos OS uses an immutable architecture with squashfs images inside partitions. Running `kairos-agent install` in QEMU pre-builds the entire disk image offline, then `dd` clones it block-for-block to the target. This is faster than running the installer on each node and ensures every node gets an identical image. The trade-off is the large image size (mitigated by sparse files and gzip compression).
 
 ### Why Stage Binaries to RAM Before `dd`?
-The `install-kairos.sh` script copies `curl`, `dd`, `gunzip`, and their shared libraries to `/dev/shm` (tmpfs/RAM) before running `dd`. This is because `dd` overwrites `/dev/sda` from block 0, destroying the partition table, bootloader, and filesystem that the currently-running NFS-booted OS depends on. After `dd` starts, the disk is no longer readable — all execution must happen from RAM. The `sysrq-trigger` reboot is used because the normal `reboot` binary on disk would be overwritten.
+The `install-kairos.sh` script copies `curl`, `dd`, `lz4 -d`, and their shared libraries to `/dev/shm` (tmpfs/RAM) before running `dd`. This is because `dd` overwrites `/dev/sda` from block 0, destroying the partition table, bootloader, and filesystem that the currently-running NFS-booted OS depends on. After `dd` starts, the disk is no longer readable — all execution must happen from RAM. The `sysrq-trigger` reboot is used because the normal `reboot` binary on disk would be overwritten.
 
 ### Why HTTP Server Instead of NFS for Image Delivery?
-The compressed disk image is served via a Python HTTP server on port 8888. While it could be read directly from the NFS-mounted `/cm/shared/kairos/`, HTTP streaming (`curl | gunzip | dd`) is more robust for large transfers — it handles retries, doesn't require mount management, and works cleanly from the RAM-staged environment. The trade-off is an additional systemd service on BCM.
+The compressed disk image is served via a Python HTTP server on port 8888. While it could be read directly from the NFS-mounted `/cm/shared/kairos/`, HTTP streaming (`curl | lz4 -d | dd`) is more robust for large transfers — it handles retries, doesn't require mount management, and works cleanly from the RAM-staged environment. The trade-off is an additional systemd service on BCM.
 
 ### Why 80 GB Virtual Disk for ~8.8 GB of Data?
 The raw disk image is 80 GB virtual but only 8.8 GB actual (after `fallocate --dig-holes`). The large virtual size ensures enough room for the Kairos partition layout (OEM, COS_STATE, COS_RECOVERY, COS_PERSISTENT). After compression, the transfer is only 1.6 GB. The trade-off is that `dd` on the compute node writes all 80 GB (including zeros), which takes longer than writing just the data. A future optimization could use `partclone` or filesystem-aware tools instead.

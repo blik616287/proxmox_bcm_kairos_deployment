@@ -164,6 +164,28 @@
 - name: Install BCM head node
   tags: [create]
   block:
+    - name: Ensure VM is stopped before install
+      community.proxmox.proxmox_kvm:
+        api_host: "{{ proxmox_api_host }}"
+        api_port: "{{ proxmox_api_port | default(8006) }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        validate_certs: false
+        node: "{{ proxmox_node }}"
+        vmid: "{{ bcm_vmid }}"
+        state: stopped
+        force: true
+        timeout: 120
+      failed_when: false
+
+    - name: Set boot order to ISO first for install
+      ansible.builtin.shell: |
+        curl -sk -X PUT -H "Authorization: {{ pve_auth_header }}" \
+          "{{ pve_api_url }}/api2/json/nodes/{{ proxmox_node }}/qemu/{{ bcm_vmid }}/config" \
+          --data-urlencode "boot=order=ide2;scsi0"
+      delegate_to: localhost
+
     - name: Start BCM VM (boots from remastered ISO)
       community.proxmox.proxmox_kvm:
         api_host: "{{ proxmox_api_host }}"
@@ -176,7 +198,7 @@
         vmid: "{{ bcm_vmid }}"
         state: started
 
-    - name: Wait for install to begin before switching boot order
+    - name: Wait for install to begin
       ansible.builtin.shell: |
         ELAPSED=0
         API_URL="{{ pve_api_url }}/api2/json/nodes/{{ proxmox_node }}/qemu/{{ bcm_vmid }}/status/current"
@@ -221,28 +243,7 @@
       async: 14400
       poll: 30
 
-# ---- Wait for VM to stop, then boot from disk ----
-
-- name: Wait for VM to power off after install
-  tags: [create]
-  ansible.builtin.shell: |
-    TIMEOUT=300
-    ELAPSED=0
-    API_URL="{{ pve_api_url }}/api2/json/nodes/{{ proxmox_node }}/qemu/{{ bcm_vmid }}/status/current"
-    AUTH="{{ pve_auth_header }}"
-    while [ $ELAPSED -lt $TIMEOUT ]; do
-      STATUS=$(curl -sk -H "Authorization: $AUTH" "$API_URL" 2>/dev/null | \
-        python3 -c "import sys,json; print(json.load(sys.stdin)['data'].get('status',''))" 2>/dev/null)
-      if [ "$STATUS" = "stopped" ]; then
-        echo "VM stopped at ${ELAPSED}s"
-        exit 0
-      fi
-      sleep 5
-      ELAPSED=$((ELAPSED + 5))
-    done
-    echo "TIMEOUT waiting for VM to stop"
-    exit 1
-  delegate_to: localhost
+# ---- Boot from disk ----
 
 - name: Switch boot order to disk-first
   tags: [create]
@@ -378,7 +379,7 @@
   delegate_to: localhost
   timeout: 1800
 
-- name: Wait for CMDaemon to start
+- name: Wait for CMD to start
   tags: [create, start]
   ansible.builtin.shell: |
     TIMEOUT=300
@@ -388,16 +389,16 @@
         -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o LogLevel=ERROR -o ConnectTimeout=5 \
         root@{{ bcm_connect_ip }} \
-        "systemctl is-active cmdaemon 2>/dev/null" 2>/dev/null)
+        "systemctl is-active cmd 2>/dev/null" 2>/dev/null)
       if [ "$STATUS" = "active" ]; then
-        echo "CMDaemon is running"
+        echo "CMD is running"
         exit 0
       fi
       sleep 10
       ELAPSED=$((ELAPSED + 10))
-      echo "cmdaemon: ${STATUS:-unknown} (${ELAPSED}s)"
+      echo "cmd: ${STATUS:-unknown} (${ELAPSED}s)"
     done
-    echo "TIMEOUT waiting for cmdaemon"
+    echo "TIMEOUT waiting for cmd"
     exit 1
   delegate_to: localhost
   timeout: 360
