@@ -1,0 +1,27 @@
+---
+# Include this in pre_tasks to load cached deployment facts.
+# If deploy_* facts exist (set by Stage 0), they override the
+# corresponding group_vars values. If not, group_vars are used as-is.
+
+- name: Apply cached deployment facts
+  ansible.builtin.set_fact:
+    proxmox_api_host: "{{ deploy_proxmox_api_host }}"
+    proxmox_api_user: "{{ deploy_proxmox_api_user }}"
+    proxmox_api_password: "{{ deploy_proxmox_api_password }}"
+    proxmox_api_token_id: "{{ deploy_proxmox_api_token_id.split('!')[-1] }}"
+    proxmox_api_token_secret: "{{ deploy_proxmox_api_token_secret }}"
+    proxmox_node: "{{ deploy_proxmox_node }}"
+    proxmox_storage: "{{ deploy_proxmox_storage }}"
+    bcm_internal_bridge: "{{ deploy_bcm_internal_bridge }}"
+    bcm_internal_ip: "{{ deploy_bcm_internal_ip }}"
+    bcm_internal_netmask: "{{ deploy_bcm_internal_netmask }}"
+    bcm_internal_cidr: "{{ deploy_bcm_internal_cidr }}"
+    bcm_external_bridge: "{{ deploy_bcm_external_bridge }}"
+    bcm_external_ip: "{{ deploy_bcm_external_ip }}"
+    bcm_external_netmask: "{{ deploy_bcm_external_netmask }}"
+    bcm_external_gateway: "{{ deploy_bcm_external_gateway }}"
+    bcm_external_dns: "{{ deploy_bcm_external_dns }}"
+    bcm_external_dns_search: "{{ deploy_bcm_external_dns_search }}"
+    bcm_vlan_tag: "{{ deploy_bcm_vlan_tag }}"
+    bcm_connect_ip: "{{ deploy_bcm_connect_ip | default(deploy_bcm_external_ip) }}"
+  when: deploy_proxmox_api_host is defined

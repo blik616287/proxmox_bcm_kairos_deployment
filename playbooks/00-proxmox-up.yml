@@ -1,5 +1,7 @@
 ---
-# Stand up Proxmox testbed — skipped if Proxmox API is already reachable.
+# Stand up Proxmox — skipped if Proxmox API is already reachable.
+# When a new Proxmox is deployed, caches deployment facts (API creds,
+# network config) to facts/ so downstream playbooks pick them up.
 
 - name: Check if Proxmox is already running
   hosts: localhost
@@ -22,7 +24,7 @@
         msg: "Proxmox already running at {{ proxmox_api_host }} — skipping setup"
       when: proxmox_already_running
 
-- name: Stand up Proxmox testbed
+- name: Stand up Proxmox
   hosts: localhost
   gather_facts: true
   tasks:
@@ -43,11 +45,18 @@
     - name: Run proxmox VM creation
       ansible.builtin.include_role:
         name: proxmox_vm
+      vars:
+        proxmox_api_host: "{{ proxmox_vm_ip }}"
+        proxmox_api_user: "root@pam"
       when: not proxmox_already_running
 
 - name: Configure Proxmox VM
   hosts: proxmox
   gather_facts: false
+  vars:
+    ansible_host: "{{ proxmox_vm_ip }}"
+    ansible_user: root
+    ansible_password: "{{ proxmox_root_password }}"
   tasks:
     - name: Check skip condition
       ansible.builtin.set_fact:
@@ -57,3 +66,73 @@
       ansible.builtin.include_role:
         name: proxmox_configure
       when: not proxmox_already_running
+
+- name: Persist deployment facts
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Cache deployment config
+      ansible.builtin.set_fact:
+        deploy_proxmox_api_host: "{{ proxmox_vm_ip }}"
+        deploy_proxmox_api_user: "root@pam"
+        deploy_proxmox_api_password: "{{ proxmox_root_password }}"
+        deploy_proxmox_api_token_id: "{{ hostvars['proxmox-ve']['api_token_full_id'] }}"
+        deploy_proxmox_api_token_secret: "{{ hostvars['proxmox-ve']['api_token_secret'] }}"
+        deploy_proxmox_node: "proxmox"
+        deploy_proxmox_storage: "local-lvm"
+        deploy_bcm_vmid: "{{ bcm_vmid }}"
+        deploy_bcm_internal_bridge: "vmbr0"
+        deploy_bcm_internal_ip: "10.100.0.200"
+        deploy_bcm_internal_netmask: "24"
+        deploy_bcm_internal_cidr: "10.100.0.0/24"
+        deploy_bcm_external_bridge: "vmbr0"
+        deploy_bcm_external_ip: "10.100.0.201"
+        deploy_bcm_external_netmask: "24"
+        deploy_bcm_external_gateway: "{{ libvirt_net_gateway }}"
+        deploy_bcm_external_dns: "{{ libvirt_net_gateway }}"
+        deploy_bcm_external_dns_search: "testbed.local"
+        deploy_bcm_vlan_tag: ""
+        deploy_bcm_connect_ip: "10.100.0.200"
+        cacheable: true
+      when: not (hostvars['localhost']['proxmox_already_running'] | default(false) | bool)
+
+    - name: Override vars for downstream plays in this run
+      ansible.builtin.set_fact:
+        proxmox_api_host: "{{ proxmox_vm_ip }}"
+        proxmox_api_user: "root@pam"
+        proxmox_node: "proxmox"
+      when: not (hostvars['localhost']['proxmox_already_running'] | default(false) | bool)
+
+    - name: Get API ticket for VM check
+      ansible.builtin.uri:
+        url: "https://{{ proxmox_api_host }}:{{ proxmox_api_port }}/api2/json/access/ticket"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          username: "{{ proxmox_api_user }}"
+          password: "{{ proxmox_root_password }}"
+        validate_certs: false
+      register: _pve_ticket
+
+    - name: Query VM {{ bcm_vmid }}
+      ansible.builtin.uri:
+        url: "https://{{ proxmox_api_host }}:{{ proxmox_api_port }}/api2/json/nodes/{{ proxmox_node }}/qemu/{{ bcm_vmid }}/status/current"
+        method: GET
+        headers:
+          Cookie: "PVEAuthCookie={{ _pve_ticket.json.data.ticket }}"
+        validate_certs: false
+      register: vm_check
+      failed_when: false
+
+    - name: Set dual-NIC skip flag
+      ansible.builtin.set_fact:
+        dual_nic_vm_exists: "{{ vm_check.status == 200 }}"
+
+    - name: Dual-NIC VM already provisioned
+      ansible.builtin.debug:
+        msg: "VM {{ bcm_vmid }} already exists — skipping dual-NIC creation"
+      when: dual_nic_vm_exists | bool
+
+- name: Create dual-NIC VM in Proxmox
+  import_playbook: ../proxmox/playbooks/05-dual-nic-vm.yml
+  when: not (hostvars['localhost']['dual_nic_vm_exists'] | default(false) | bool)

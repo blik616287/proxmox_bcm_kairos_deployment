@@ -1,0 +1,13 @@
+---
+# Stage 3 (API variant): Deploy BCM head node via Proxmox API.
+# Use this when SSH to the Proxmox host is not available.
+# Loads cached deployment facts from Stage 0, falls back to group_vars.
+
+- name: Manage BCM head node VM (API)
+  hosts: localhost
+  gather_facts: true
+  pre_tasks:
+    - name: Load deployment facts
+      ansible.builtin.include_tasks: load-deploy-facts.yml
+  roles:
+    - bcm_vm_api

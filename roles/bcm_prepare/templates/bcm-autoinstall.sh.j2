@@ -3,7 +3,7 @@
 export DEBIAN_FRONTEND=noninteractive
 LOG="/var/log/bcm-auto-install.log"
 exec </dev/null >>/dev/console 2>&1
-exec > >(tee -a "$LOG" >/dev/console) 2>&1
+exec > >(tee -a "$LOG" | tee /dev/ttyS0 >/dev/console) 2>&1
 
 systemctl stop serial-getty@ttyS0.service 2>/dev/null || true
 systemctl stop getty@tty1.service 2>/dev/null || true
@@ -15,17 +15,219 @@ echo " BCM Automated Installation"
 echo " $(date)"
 echo "=========================================="
 
-PASS="{{ bcm_password }}"
-mkdir -p /mnt/config
-for dev in /dev/vdb /dev/sdb /dev/vdb1 /dev/sdb1; do
-    if [ -b "$dev" ]; then
-        if mount "$dev" /mnt/config 2>/dev/null; then
-            [ -f /mnt/config/password.txt ] && PASS=$(cat /mnt/config/password.txt)
-            echo "[OK] Config drive from $dev"
+# Read network config from cloud-init CIDATA drive and apply it
+# Cloud-init doesn't run in the ramdisk, so we parse the drive directly
+echo "[..] Looking for cloud-init CIDATA drive..."
+mkdir -p /mnt/cidata
+CIDATA_FOUND=false
+for dev in /dev/sr0 /dev/sr1 /dev/sr2 /dev/sr3 /dev/vdb /dev/sdb; do
+    [ -b "$dev" ] || continue
+    if mount -o ro "$dev" /mnt/cidata 2>/dev/null; then
+        if [ -f /mnt/cidata/network-config ]; then
+            CIDATA_FOUND=true
+            echo "[OK] CIDATA from $dev"
             break
         fi
+        umount /mnt/cidata 2>/dev/null
     fi
 done
+# Also try by label
+if [ "$CIDATA_FOUND" = "false" ]; then
+    CIDEV=$(findfs LABEL=CIDATA 2>/dev/null || findfs LABEL=cidata 2>/dev/null || true)
+    if [ -n "$CIDEV" ] && mount -o ro "$CIDEV" /mnt/cidata 2>/dev/null; then
+        [ -f /mnt/cidata/network-config ] && CIDATA_FOUND=true && echo "[OK] CIDATA from $CIDEV (label)"
+    fi
+fi
+
+if [ "$CIDATA_FOUND" = "true" ] && [ -f /mnt/cidata/network-config ]; then
+    echo "[..] Applying network config from CIDATA..."
+    NC="/mnt/cidata/network-config"
+    cat "$NC"
+    # Proxmox uses cloud-init v1 format:
+    #   - type: physical / name: eth0 / subnets: [{address: x.x.x.x, netmask: y, gateway: z}]
+    #   - type: nameserver / address: [dns]
+    # Also support v2 netplan format
+    if grep -q "version: 1" "$NC"; then
+        # V1 format — parse physical interfaces by name
+        # Note: match "address:" but NOT "mac_address:" (which also contains "address:")
+        ETH0_IP=$(awk '/name:.*eth0/{found=1} found && /^ *address:/ && !/mac_address/{print $2; exit}' "$NC" | tr -d "'\"")
+        ETH0_NETMASK=$(awk '/name:.*eth0/{found=1} found && /netmask:/{print $2; exit}' "$NC" | tr -d "'\"")
+        ETH1_IP=$(awk '/name:.*eth1/{found=1} found && /^ *address:/ && !/mac_address/{print $2; exit}' "$NC" | tr -d "'\"")
+        ETH1_NETMASK=$(awk '/name:.*eth1/{found=1} found && /netmask:/{print $2; exit}' "$NC" | tr -d "'\"")
+        GW=$(awk '/gateway:/{print $2; exit}' "$NC" | tr -d "'\"")
+        DNS=$(awk '/type: nameserver/{found=1} found && /- /{gsub(/[^0-9.]/,""); if(length>0){print; exit}}' "$NC")
+        # Convert dotted netmask to CIDR prefix
+        if [ -n "$ETH0_NETMASK" ]; then
+            ETH0_MASK=$(echo "$ETH0_NETMASK" | awk -F. '{for(i=1;i<=4;i++){b=0;v=$i;while(v>0){b+=v%2;v=int(v/2)};t+=b}}END{print t}')
+        else
+            ETH0_MASK="24"
+        fi
+        if [ -n "$ETH1_NETMASK" ]; then
+            ETH1_MASK=$(echo "$ETH1_NETMASK" | awk -F. '{for(i=1;i<=4;i++){b=0;v=$i;while(v>0){b+=v%2;v=int(v/2)};t+=b}}END{print t}')
+        else
+            ETH1_MASK="24"
+        fi
+        [ -n "$ETH0_IP" ] && ETH0_CIDR="${ETH0_IP}/${ETH0_MASK}"
+        [ -n "$ETH1_IP" ] && ETH1_CIDR="${ETH1_IP}/${ETH1_MASK}"
+    else
+        # V2 netplan format
+        ETH0_CIDR=$(grep -A10 'internal\|eth0\|ens18' "$NC" | grep -oP '\d+\.\d+\.\d+\.\d+/\d+' | head -1)
+        ETH1_CIDR=$(grep -A10 'external\|eth1\|ens19' "$NC" | grep -oP '\d+\.\d+\.\d+\.\d+/\d+' | head -1)
+        GW=$(grep -A2 'gateway\|via' "$NC" | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1)
+        DNS=$(grep -A3 'nameserver\|dns' "$NC" | grep -oP '\d+\.\d+\.\d+\.\d+' | head -1)
+        ETH0_IP="${ETH0_CIDR%/*}"; ETH0_MASK="${ETH0_CIDR#*/}"
+        ETH1_IP="${ETH1_CIDR%/*}"; ETH1_MASK="${ETH1_CIDR#*/}"
+    fi
+
+    if [ -n "$ETH0_CIDR" ]; then
+        ETH0_IP="${ETH0_CIDR%/*}"
+        ETH0_MASK="${ETH0_CIDR#*/}"
+        ETH1_IP="${ETH1_CIDR%/*}"
+        ETH1_MASK="${ETH1_CIDR#*/}"
+
+        # Bring up interfaces and assign IPs
+        for iface in eth0 eth1 ens18 ens19; do
+            ip link set "$iface" up 2>/dev/null || true
+        done
+        ip addr add "${ETH0_CIDR}" dev eth0 2>/dev/null || ip addr add "${ETH0_CIDR}" dev ens18 2>/dev/null || true
+        [ -n "$ETH1_CIDR" ] && { ip addr add "${ETH1_CIDR}" dev eth1 2>/dev/null || ip addr add "${ETH1_CIDR}" dev ens19 2>/dev/null || true; }
+        [ -n "$GW" ] && ip route add default via "$GW" 2>/dev/null || true
+        [ -n "$DNS" ] && echo "nameserver $DNS" > /etc/resolv.conf
+        echo "[OK] Network applied: eth0=${ETH0_CIDR} eth1=${ETH1_CIDR} gw=${GW}"
+        ip -br addr | grep -v lo
+    else
+        echo "[WARN] Could not parse IPs from CIDATA"
+    fi
+else
+    echo "[INFO] No CIDATA drive found — using DHCP/existing config"
+    # Fall back to detecting IPs from running interfaces
+    ETH0_IP=$(ip -4 addr show eth0 2>/dev/null | grep -oP 'inet \K[0-9.]+' || \
+              ip -4 addr show ens18 2>/dev/null | grep -oP 'inet \K[0-9.]+' || true)
+    ETH0_MASK=$(ip -4 addr show eth0 2>/dev/null | grep -oP 'inet [0-9.]+/\K[0-9]+' || \
+                ip -4 addr show ens18 2>/dev/null | grep -oP 'inet [0-9.]+/\K[0-9]+' || true)
+    ETH1_IP=$(ip -4 addr show eth1 2>/dev/null | grep -oP 'inet \K[0-9.]+' || \
+              ip -4 addr show ens19 2>/dev/null | grep -oP 'inet \K[0-9.]+' || true)
+    ETH1_MASK=$(ip -4 addr show eth1 2>/dev/null | grep -oP 'inet [0-9.]+/\K[0-9]+' || \
+                ip -4 addr show ens19 2>/dev/null | grep -oP 'inet [0-9.]+/\K[0-9]+' || true)
+    GW=$(ip route show default 2>/dev/null | grep -oP 'via \K[0-9.]+' | head -1 || true)
+fi
+echo "[OK] eth0=${ETH0_IP:-none}/${ETH0_MASK:-none} eth1=${ETH1_IP:-none}/${ETH1_MASK:-none} gw=${GW:-none}"
+
+# Render build-config.xml from template using CIDATA values
+if [ "$CIDATA_FOUND" = "true" ] && [ -f /cm/build-config.xml.tpl ] && [ -f /mnt/cidata/network-config ]; then
+    echo "[..] Rendering build-config.xml from CIDATA..."
+    python3 << 'PYRENDER'
+import yaml
+from jinja2 import Template
+
+# Parse CIDATA network-config
+with open('/mnt/cidata/network-config') as f:
+    nc = yaml.safe_load(f)
+
+# Extract physical interfaces and nameserver from cloud-init config
+phys = []
+dns = []
+for entry in nc.get('config', []):
+    if entry.get('type') == 'physical':
+        iface = {'name': entry['name'], 'mac': entry.get('mac_address', '')}
+        for sub in entry.get('subnets', []):
+            iface['ip'] = sub.get('address', '')
+            iface['netmask'] = sub.get('netmask', '255.255.255.0')
+            iface['gateway'] = sub.get('gateway', '')
+        phys.append(iface)
+    elif entry.get('type') == 'nameserver':
+        dns = entry.get('address', [])
+
+# Helper: dotted netmask to CIDR bits
+def mask_to_bits(mask):
+    return sum(bin(int(x)).count('1') for x in mask.split('.'))
+
+# Helper: compute network base
+def net_base(ip, bits):
+    parts = [int(x) for x in ip.split('.')]
+    mask_parts = []
+    for i in range(4):
+        if bits >= 8:
+            mask_parts.append(255); bits -= 8
+        else:
+            mask_parts.append(256 - (1 << (8 - bits))); bits = 0
+    return '.'.join(str(p & m) for p, m in zip(parts, mask_parts))
+
+# Build networks and interfaces from parsed NICs
+# First NIC = internalnet (provisioning), rest = externalnet
+networks = []
+interfaces = []
+for i, nic in enumerate(phys):
+    bits = mask_to_bits(nic.get('netmask', '255.255.255.0'))
+    base = net_base(nic['ip'], bits)
+    base_prefix = nic['ip'].rsplit('.', 1)[0]
+
+    if i == 0:
+        networks.append({
+            'name': 'internalnet', 'type': 'internal',
+            'base': base, 'maskbits': str(bits),
+            'domain': 'eth.cluster',
+            'dyn_start': base_prefix + '.16',
+            'dyn_end': base_prefix + '.200',
+        })
+        interfaces.append({
+            'name': nic['name'], 'network': 'internalnet',
+            'ip': nic['ip'], 'provisioning': True,
+        })
+    else:
+        net = {
+            'name': 'externalnet', 'type': 'external',
+            'base': base, 'maskbits': str(bits),
+            'domain': 'brightcomputing.com',
+        }
+        if nic.get('gateway'):
+            net['gateway'] = nic['gateway']
+        networks.append(net)
+        interfaces.append({
+            'name': nic['name'], 'network': 'externalnet',
+            'ip': nic['ip'],
+        })
+
+# Slave node IP = first usable address in internal network
+slave_ip = interfaces[0]['ip'].rsplit('.', 1)[0] + '.1' if interfaces else '10.141.0.1'
+
+# Read hostname from meta-data if available
+hostname = 'bcm-head'
+try:
+    with open('/mnt/cidata/meta-data') as f:
+        meta = yaml.safe_load(f)
+        hostname = meta.get('local-hostname', hostname)
+except Exception:
+    pass
+
+# Render template
+with open('/cm/build-config.xml.tpl') as f:
+    tpl = Template(f.read())
+
+result = tpl.render(
+    networks=networks,
+    interfaces=interfaces,
+    hostname=hostname,
+    timezone=meta.get('timezone', 'America/Los_Angeles'),
+    slave_ip=slave_ip,
+)
+
+with open('/cm/build-config.xml', 'w') as f:
+    f.write(result)
+
+print(f"[OK] Rendered build-config.xml: {len(networks)} networks, {len(interfaces)} interfaces")
+for n in networks:
+    print(f"  {n['name']}: base={n['base']}/{n['maskbits']}")
+for iface in interfaces:
+    print(f"  {iface['name']}: {iface['ip']} -> {iface['network']}")
+PYRENDER
+else
+    echo "[INFO] No CIDATA or no template — using default build-config.xml"
+fi
+
+umount /mnt/cidata 2>/dev/null
+
+PASS="{{ bcm_password }}"
 
 echo "[..] Waiting for installer environment..."
 TRIES=0
@@ -55,13 +257,13 @@ echo "=========================================="
 echo " Running cm-master-install"
 echo "=========================================="
 cd /cm
-yes | perl ./cm-master-install --config /cm/build-config.xml --mountpath /mnt/cdrom --password "$PASS" --autoreboot 2>&1 | tee -a "$LOG"
+yes | perl ./cm-master-install --config /cm/build-config.xml --mountpath /mnt/cdrom --password "$PASS" 2>&1 | tee -a "$LOG"
 RETVAL=${PIPESTATUS[1]}
 if [ $RETVAL -ne 0 ]; then
     echo " INSTALLATION FAILED (exit code: $RETVAL)"; exit $RETVAL
 fi
 
-echo "[..] Fixing GRUB..."
+echo "[..] Patching installed system GRUB + networking..."
 vgchange -ay 2>/dev/null || true; sleep 1
 INSTALLED_ROOT=""
 mkdir -p /mnt/installed
@@ -75,17 +277,40 @@ for part in $(ls /dev/mapper/*-root /dev/mapper/*root 2>/dev/null) /dev/vda5 /de
     fi
 done
 if [ -n "$INSTALLED_ROOT" ]; then
-    grep -q "net.ifnames=0" /mnt/installed/etc/default/grub || \
-        sed -i 's/biosdevname=0/net.ifnames=0 biosdevname=0/' /mnt/installed/etc/default/grub
+    echo "[OK] Found installed root at $INSTALLED_ROOT"
+
+    # Add net.ifnames=0 biosdevname=0 to GRUB_CMDLINE_LINUX
+    if ! grep -q "net.ifnames=0" /mnt/installed/etc/default/grub; then
+        sed -i 's/^GRUB_CMDLINE_LINUX="\(.*\)"/GRUB_CMDLINE_LINUX="\1 net.ifnames=0 biosdevname=0"/' /mnt/installed/etc/default/grub
+        echo "[OK] Patched /etc/default/grub"
+    fi
+
+    # Mount /boot and patch grub.cfg directly
     BOOT_PART=""
     for bp in /dev/vda1 /dev/sda1; do
         [ -b "$bp" ] && mount "$bp" /mnt/installed/boot 2>/dev/null && BOOT_PART="$bp" && break
     done
-    [ -f /mnt/installed/boot/grub/grub.cfg ] && \
-        sed -i 's/biosdevname=0/net.ifnames=0 biosdevname=0/g' /mnt/installed/boot/grub/grub.cfg
+    if [ -f /mnt/installed/boot/grub/grub.cfg ]; then
+        if ! grep -q "net.ifnames=0" /mnt/installed/boot/grub/grub.cfg; then
+            sed -i '/^\s*linux\s/s/$/ net.ifnames=0 biosdevname=0/' /mnt/installed/boot/grub/grub.cfg
+            echo "[OK] Patched grub.cfg"
+        fi
+    fi
     [ -n "$BOOT_PART" ] && umount /mnt/installed/boot 2>/dev/null
+
+    # Install dual NIC ARP fix (oneshot service, only activates if both NICs share a subnet)
+    cp /usr/local/sbin/fix-dual-nic-arp.sh /mnt/installed/usr/local/sbin/fix-dual-nic-arp.sh
+    chmod +x /mnt/installed/usr/local/sbin/fix-dual-nic-arp.sh
+    cp /usr/lib/systemd/system/fix-dual-nic-arp.service /mnt/installed/usr/lib/systemd/system/fix-dual-nic-arp.service
+    mkdir -p /mnt/installed/etc/systemd/system/multi-user.target.wants
+    ln -sf /usr/lib/systemd/system/fix-dual-nic-arp.service /mnt/installed/etc/systemd/system/multi-user.target.wants/fix-dual-nic-arp.service
+    echo "[OK] Installed dual NIC ARP fix service"
+
     umount /mnt/installed 2>/dev/null
+else
+    echo "[WARN] Could not find installed root partition"
 fi
 echo "=========================================="
-echo " INSTALLATION COMPLETE - rebooting..."
+echo " INSTALLATION COMPLETE - powering off..."
 echo "=========================================="
+poweroff

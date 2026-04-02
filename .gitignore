@@ -15,6 +15,7 @@ logs/
 
 # Credentials (contains secrets)
 inventory/group_vars/all.yml
+inventory/group_vars/all
 
 # Claude Code
 .claude/
@@ -28,3 +29,6 @@ CanvOS/
 .bcm-prep.*
 
 proxmox.api.token
+
+# Ansible fact cache
+facts/

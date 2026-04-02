@@ -65,8 +65,13 @@ orchestrate: ## Run full end-to-end pipeline (all stages)
 	$(call run-playbook,site.yml)
 
 .PHONY: proxmox-up
-proxmox-up: ## Stage 0: Stand up Proxmox testbed (skipped if API reachable)
+proxmox-up: ## Stage 0: Stand up Proxmox testbed + dual-NIC VM (skipped if API reachable)
 	$(call run-playbook,00-proxmox-up.yml)
+
+.PHONY: proxmox-down
+proxmox-down: ## Tear down the Proxmox testbed VM and libvirt network
+	@mkdir -p $(LOG_DIR)
+	ansible-playbook proxmox/playbooks/teardown.yml $(ANSIBLE_ARGS) 2>&1 | tee $(LOG_DIR)/proxmox-teardown.log
 
 .PHONY: create-vmbr1
 create-vmbr1: ## Stage 1: Create internal bridge (vmbr1) in Proxmox
@@ -79,6 +84,10 @@ bcm-prepare: ## Stage 2: Download + patch + remaster BCM ISO
 .PHONY: bcm-vm-create
 bcm-vm-create: ## Stage 3: Create BCM head node VM in Proxmox
 	$(call run-playbook,03-bcm-vm.yml)
+
+.PHONY: bcm-vm-create-api
+bcm-vm-create-api: ## Stage 3 (API): Create BCM VM via Proxmox API (no SSH required)
+	$(call run-playbook,03-bcm-vm-api.yml)
 
 .PHONY: kairos-build
 kairos-build: ## Stage 4: Build Kairos ISO + raw disk image via QEMU

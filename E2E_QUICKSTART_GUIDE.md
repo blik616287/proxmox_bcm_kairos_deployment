@@ -1,0 +1,514 @@
+# E2E Quickstart Guide
+
+This guide walks through each deployment stage in detail. It assumes you understand Ansible, Proxmox, LVM thin provisioning, and PXE boot infrastructure.
+
+All configuration lives in `inventory/group_vars/all` (no `.yml` extension). This file is gitignored — it contains secrets.
+
+---
+
+## Stage 0: `make proxmox-down`
+
+**Playbook**: `playbooks/teardown.yml`
+**Hosts**: `proxmox` (SSH) + `localhost`
+
+### What it does
+
+Destroys the entire deployment — VMs, ISOs, bridge config, and local build artifacts. Run this to start clean.
+
+1. SSHs to the Proxmox host and runs `qm stop` + `qm destroy --purge` on both VMs (`bcm_vmid` and `kairos_vmid`)
+2. Removes uploaded ISOs from `/var/lib/vz/template/iso/`
+3. Removes vmbr1 config from `/etc/network/interfaces` (if present)
+4. Locally deletes `build/`, `dist/`, `logs/`, `facts/`
+
+### Required configuration
+
+| Variable | Purpose | Example |
+|----------|---------|---------|
+| `proxmox_api_host` | Proxmox SSH target | `10.100.0.2` |
+| `proxmox_api_password` | SSH password (via `ansible_password` in inventory) | `testbed123` |
+| `bcm_vmid` | BCM VM ID to destroy | `200` |
+| `kairos_vmid` | Kairos VM ID to destroy | `201` |
+
+### What can go wrong
+
+- SSH to Proxmox fails — check `proxmox_api_host` and password in `inventory/hosts.yml`
+- VMs don't exist — safe, all commands use `|| true`
+
+---
+
+## Stage 1: `make proxmox-up`
+
+**Playbook**: `playbooks/00-proxmox-up.yml`
+**Hosts**: `localhost` + `proxmox`
+
+### What it does
+
+Stands up a nested Proxmox VE hypervisor as a libvirt VM on the local machine. If `proxmox_api_host` is already reachable (HTTP 200 or 401 on port 8006), the entire stage is skipped.
+
+#### Phase 1: Reachability check
+
+Hits `https://{proxmox_api_host}:8006/api2/json`. If reachable, sets `proxmox_already_running: true` and skips everything.
+
+#### Phase 2: Host preparation (role: `host_prepare` from `proxmox/` submodule)
+
+- Verifies KVM support (`kvm-ok`) and nested virtualization
+- Installs libvirt, QEMU, genisoimage, xorriso, Python packages (`proxmoxer`, `requests`)
+- Ensures `libvirtd` is running, user is in `libvirt` + `kvm` groups
+
+#### Phase 3: Libvirt network (role: `libvirt_network` from submodule)
+
+Creates a NAT bridge (`virbr-pve`) on `10.100.0.0/24`:
+- Gateway: `libvirt_net_gateway` (10.100.0.1)
+- DHCP range: `libvirt_net_dhcp_start` to `libvirt_net_dhcp_end`
+- Static lease for Proxmox VM at `proxmox_vm_ip` / `proxmox_vm_mac`
+
+#### Phase 4: Proxmox VM (role: `proxmox_vm` from submodule)
+
+1. Downloads Proxmox VE 8.4 ISO (with SHA256 verification)
+2. **ISO remastering**: mounts ISO, injects `answer.toml` (from `templates/proxmox-answer.toml.j2`) with root password, network config, and auto-installer mode. Patches GRUB for serial console + zero timeout. Rebuilds with xorriso.
+3. Creates a qcow2 disk (`proxmox_vm_disk_size`, default 700G — thin on host)
+4. Boots libvirt VM from remastered ISO, waits for install to complete via serial log monitoring
+5. Reboots from disk, waits for API at `proxmox_vm_ip:8006`
+
+#### Phase 5: Proxmox configuration (role: `proxmox_configure` from submodule)
+
+SSHs to the new Proxmox VM and:
+- Disables enterprise repos, enables no-subscription repo
+- Creates API token: `root@pam!ansible` with `privsep=0` (full access)
+- Downloads Ubuntu cloud image, creates VM template (VMID 9000)
+
+#### Phase 6: Persist deployment facts
+
+Caches all deployment config as Ansible facts in `facts/` (jsonfile cache):
+
+```
+deploy_proxmox_api_host, deploy_proxmox_api_user, deploy_proxmox_api_password,
+deploy_proxmox_api_token_id, deploy_proxmox_api_token_secret,
+deploy_proxmox_node, deploy_proxmox_storage,
+deploy_bcm_internal_bridge, deploy_bcm_internal_ip, deploy_bcm_internal_netmask,
+deploy_bcm_internal_cidr, deploy_bcm_external_bridge, deploy_bcm_external_ip,
+deploy_bcm_external_netmask, deploy_bcm_external_gateway, deploy_bcm_external_dns,
+deploy_bcm_external_dns_search, deploy_bcm_vlan_tag, deploy_bcm_connect_ip
+```
+
+These facts override `group_vars/all` in all downstream playbooks via `playbooks/load-deploy-facts.yml`.
+
+#### Phase 7: Dual-NIC VM (imported from `proxmox/playbooks/05-dual-nic-vm.yml`)
+
+Creates VM 200 (the BCM host) from the Ubuntu cloud template:
+- Clones template, configures 2 NICs on `vmbr0`, sets cloud-init IPs
+- Boots to verify SSH on both NICs, then stops
+- Removes the cloned OS disk, creates a fresh 500G disk + CIDATA drive
+- Sets boot order to `scsi0;ide2`
+
+Skipped if VM 200 already exists (checked via API ticket auth).
+
+### Required configuration
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `proxmox_api_host` | Target Proxmox IP (checked for reachability) | `10.100.0.2` |
+| `proxmox_vm_ip` | IP assigned to testbed VM | `10.100.0.2` |
+| `proxmox_vm_mac` | MAC for DHCP reservation | `52:54:00:aa:bb:01` |
+| `proxmox_vm_disk_size` | Testbed disk size (backs LVM thin pool) | `700G` |
+| `proxmox_vm_ram_mb` | Testbed RAM | `49152` (48 GB) |
+| `proxmox_vm_vcpus` | Testbed CPUs | `8` |
+| `proxmox_root_password` | Root password for Proxmox | `testbed123` |
+| `proxmox_fqdn` | FQDN in answer.toml | `proxmox.testbed.local` |
+| `libvirt_net_gateway` | NAT bridge gateway | `10.100.0.1` |
+| `bcm_vmid` | VM ID for BCM head node | `200` |
+
+### Thin pool sizing
+
+The testbed VM disk backs an LVM thin pool. Proxmox allocates ~60% of the disk to `local-lvm`. With `700G`:
+- Thin pool: ~420G
+- BCM VM 500G virtual (thin, ~30G actual)
+- Kairos VM 80G virtual (thin, ~37G actual after dd)
+- Total actual: ~70G — well within 420G
+
+If the pool is too small, the Kairos dd will silently corrupt the installer image's XFS filesystem when the pool hits 100%.
+
+### What can go wrong
+
+- `proxmox_api_host` points to a reachable server → everything is skipped (including fact caching)
+- Proxmox ISO download fails — check network, checksum mismatch
+- API token gets regenerated on subsequent runs — the `proxmox_configure` role recreates it every time, invalidating cached facts
+- Dual-NIC VM disk resize fails — if VM already exists with a larger disk, "shrinking disks not supported" error. Handled by the existence check.
+
+---
+
+## Stage 2: `make bcm-prepare`
+
+**Playbook**: `playbooks/02-bcm-prepare.yml`
+**Role**: `bcm_prepare`
+**Hosts**: `localhost`
+
+### What it does
+
+Downloads the BCM ISO from JFrog, extracts the kernel and rootfs, patches the rootfs for unattended installation, and remasters the ISO with xorriso.
+
+#### Step-by-step
+
+1. **Download BCM ISO** from `https://{jfrog_instance}/{jfrog_repo}/{iso_filename}` using bearer token auth. Cached in `dist/`. Skipped if file exists and size matches.
+
+2. **Extract kernel + rootfs** from the ISO using 7z:
+   - Kernel: `boot/vmlinuz` → `build/.bcm-kernel`
+   - Rootfs: `boot/rootfs.cgz` → extracted, patched, repacked
+
+3. **Patch rootfs** (the installer ramdisk):
+   - Injects `bcm-autoinstall.sh` (from `roles/bcm_prepare/templates/bcm-autoinstall.sh.j2`) into `/usr/local/bin/`
+   - Injects `bcm-autoinstall.service` (systemd oneshot, runs after multi-user.target)
+   - Injects `fix-dual-nic-arp.sh` + service (handles ARP issues when both NICs share a subnet)
+   - The autoinstall script:
+     - Reads cloud-init CIDATA for static network config
+     - Renders `build-config.xml` for `cm-master-install`
+     - Runs `cm-master-install --config build-config.xml --mountpath /mnt/cdrom --password {bcm_password}`
+     - Patches installed GRUB with `net.ifnames=0 biosdevname=0`
+     - Installs dual-NIC ARP fix service
+     - Calls `poweroff` (not reboot)
+
+4. **Create config drive** (FAT32, 4MB) with cloud-init network config for static IP assignment
+
+5. **Patch GRUB/isolinux** in the ISO tree:
+   - Sets timeout=0, disables menu
+   - Adds serial console args
+   - Adds `net.ifnames=0 biosdevname=0` to kernel cmdline
+
+6. **Rebuild ISO** with xorriso preserving boot sectors
+
+### Required configuration
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `jfrog_token` | Bearer token for ISO download | (JWT) |
+| `jfrog_instance` | JFrog hostname | `insightsoftmax.jfrog.io` |
+| `jfrog_repo` | Repository name | `iso-releases` |
+| `iso_filename` | ISO file name | `bcm-11.0-ubuntu2404.iso` |
+| `bcm_password` | BCM root password (used by cm-master-install) | `Br1ghtClust3r` |
+| `bcm_hostname` | BCM hostname | `bcm11-headnode` |
+| `bcm_timezone` | Timezone | `America/Los_Angeles` |
+| `bcm_internal_ip` | BCM eth0 IP (provisioning network) | `172.16.103.201` |
+| `bcm_external_ip` | BCM eth1 IP (management network) | `172.16.103.202` |
+| `bcm_external_gateway` | Default gateway | `172.16.103.1` |
+| `bcm_external_dns` | DNS server | `172.16.10.31` |
+| `bcm_static_network` | Use static IPs (true) or DHCP (false) | `true` |
+
+When deploy facts exist (from Stage 0), `bcm_internal_ip`, `bcm_external_ip`, etc. are overridden with testbed values (e.g., `10.100.0.200`, `10.100.0.201`).
+
+### Artifacts produced
+
+| File | Description |
+|------|-------------|
+| `dist/{iso_filename}` | Original BCM ISO (~13 GB) |
+| `build/bcm-autoinstall.iso` | Remastered ISO with autoinstall |
+| `build/.bcm-kernel` | Extracted kernel for direct boot |
+| `build/.bcm-rootfs-auto.cgz` | Patched rootfs with autoinstall |
+| `build/.bcm-init.img` | FAT32 config drive with network config |
+
+### What can go wrong
+
+- JFrog token expired — 401 on download
+- xorriso not installed — `make install-deps` first
+- ISO remastering produces unbootable image — check GRUB patch in the role
+- Stale cached ISO — if config changes (IPs, password), delete `build/bcm-autoinstall.iso` and re-run
+
+---
+
+## Stage 3: `make bcm-vm-create-api`
+
+**Playbook**: `playbooks/03-bcm-vm-api.yml`
+**Role**: `bcm_vm_api`
+**Hosts**: `localhost`
+
+### What it does
+
+Deploys the BCM head node entirely via the Proxmox API — no SSH to the Proxmox host required. Uploads the remastered ISO, configures the VM, installs BCM, waits for poweroff, switches boot to disk, and verifies SSH + CMDaemon.
+
+#### Step-by-step
+
+1. **Load deploy facts** — overrides `proxmox_api_host`, `proxmox_api_token_secret`, etc. from cached facts
+
+2. **Set API auth** — constructs `pve_api_url` and `pve_auth_header` (`PVEAPIToken=root@pam!ansible={secret}`)
+
+3. **Upload ISO** — always deletes the existing ISO first (`DELETE /storage/local/content/local:iso/bcm-autoinstall.iso`), then uploads via multipart POST to `/storage/local/upload`. Waits for the `imgcopy` async task to complete (polls task status every 5s, up to 600s).
+
+4. **Check VM exists** — GET `/qemu/{bcm_vmid}/status/current`. If 200, skips creation.
+
+5. **Create VM** (if new) — `community.proxmox.proxmox_kvm` module:
+   - SeaBIOS, 2 NICs (`net0` = internal virtio + MAC, `net1` = external e1000 + MAC)
+   - Disk on `proxmox_storage` (default `local-lvm`)
+   - VLAN tags applied if `bcm_vlan_tag` is defined
+
+6. **Configure for install** — via raw API curl:
+   - Attaches ISO as `ide2`
+   - Sets boot order to `ide2;scsi0` (CD-ROM first)
+   - Sets `vga=std` for noVNC console access
+   - Configures cloud-init: `ipconfig0` (internal), `ipconfig1` (external + gateway), `nameserver`
+
+7. **Start VM** — boots from remastered ISO, autoinstall begins
+
+8. **Wait for disk writes to start** — polls `/qemu/{bcm_vmid}/status/current` for `diskwrite > 100MB` (up to 600s)
+
+9. **Wait for VM to power off** — the autoinstall script calls `poweroff` when done. Polls VM status every 30s for `status=stopped` (up to 4 hours). This replaced the old disk-write-stability check.
+
+10. **Switch boot order** — sets `boot=order=scsi0;ide2` (disk first)
+
+11. **Start from disk** — VM boots into installed BCM
+
+12. **Wait for SSH** — if `bcm_static_network`, waits for SSH on `bcm_external_ip`. Otherwise discovers IP via QEMU guest agent.
+
+13. **Cache BCM IP** — stores `deploy_bcm_connect_ip` as a cacheable fact for downstream stages
+
+14. **Verify** — SSHs to BCM, runs `hostname; ip -br addr`
+
+15. **Wait for cmfirstboot** — polls `systemctl is-active cmfirstboot` until inactive (up to 30 min)
+
+16. **Wait for CMDaemon** — polls `systemctl is-active cmd` until active (up to 5 min)
+
+### Required configuration
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `proxmox_api_host` | Proxmox API endpoint | `10.100.0.2` |
+| `proxmox_api_user` | API user | `root@pam` |
+| `proxmox_api_token_id` | Token name | `ansible` |
+| `proxmox_api_token_secret` | Token secret | (from facts or group_vars) |
+| `proxmox_node` | Proxmox node name | `proxmox` |
+| `proxmox_storage` | VM disk storage | `local-lvm` |
+| `bcm_vmid` | VM ID | `200` |
+| `bcm_vm_cores` | CPU cores | `4` |
+| `bcm_vm_memory` | RAM in MB | `8192` |
+| `bcm_vm_disk_size` | Disk size | `100G` |
+| `bcm_vm_mac_internal` | eth0 MAC | `BC:24:11:7F:33:7C` |
+| `bcm_vm_mac_external` | eth1 MAC | `BC:24:11:ED:21:50` |
+| `bcm_password` | BCM root password | `Br1ghtClust3r` |
+| `bcm_static_network` | Static vs DHCP | `true` |
+| `bcm_internal_ip` | eth0 IP | (from facts or group_vars) |
+| `bcm_external_ip` | eth1 IP | (from facts or group_vars) |
+| `bcm_external_gateway` | Gateway | (from facts or group_vars) |
+| `bcm_external_dns` | DNS | (from facts or group_vars) |
+
+### What can go wrong
+
+- **API token invalid** — `proxmox_configure` regenerates the token on every `proxmox-up` run, invalidating cached facts. Re-run `proxmox-up` or manually create a new token.
+- **ISO upload fails** — empty API response. Check token, check Proxmox storage space (`df -h /var/lib/vz` on Proxmox).
+- **Install hangs** — BCM install takes 60-90 minutes. The wait task polls for 4 hours. Check noVNC console on the Proxmox web UI.
+- **cmfirstboot timeout** — BCM first boot can take 30 minutes. Check `journalctl -u cmfirstboot` on BCM.
+- **VM boots from ISO again** — boot order wasn't switched. The playbook now waits for poweroff, then switches boot order before starting.
+
+---
+
+## Stage 4: `make kairos-build`
+
+**Playbook**: `playbooks/04-kairos-build.yml`
+**Role**: `kairos_build`
+**Hosts**: `localhost`
+
+### What it does
+
+Builds the Kairos OS ISO via CanvOS (Earthly + Docker), then creates a bootable 80 GB raw disk image by running `kairos-agent install` in a headless QEMU VM.
+
+#### Step-by-step
+
+1. **Initialize CanvOS submodule** — `git submodule update --init` in `CanvOS/`
+
+2. **Generate `.arg` file** — CanvOS build arguments from template (registry, OS version, kernel version, platform)
+
+3. **Copy overlay files** — custom network config, BCM compatibility scripts from `files/canvos/overlay/` into CanvOS build context
+
+4. **Patch Earthfile** — adds packages to the build (`wget`, `ifupdown`, `nfs-common`)
+
+5. **Run CanvOS build** — `earthly.sh +iso` inside Docker. Produces the Palette Edge Installer ISO.
+
+6. **Generate SSH keypair** — ED25519 key for BCM ↔ Kairos communication (`build/bcm-kairos-key`)
+
+7. **Render cloud-config** — from `roles/kairos_build/templates/cloud-config.yaml.j2`:
+   - Users (kairos user with SSH key)
+   - Palette agent registration (endpoint, token, project UID)
+   - Boot scripts for BCM integration
+   - Network config
+
+8. **Create user-data image** — FAT32 4MB image with `cloud-config.yaml` as `user-data` (mounted in QEMU as CIDATA)
+
+9. **Create blank raw disk** — `truncate -s 81920M build/kairos-disk.raw` (80 GB sparse)
+
+10. **Run kairos-agent install in QEMU** (SeaBIOS, headless):
+    - Boots from the CanvOS ISO
+    - Mounts user-data drive, copies cloud-config
+    - Runs `kairos-agent --debug install`
+    - kairos-agent partitions the disk (vda1=EFI 100M, vda2=swap 16G, vda3=root ~64G) and installs GRUB-pc to MBR
+    - Powers off when done
+
+11. **Fix ext4 metadata_csum** — GRUB compatibility: `tune2fs -O ^metadata_csum` on each ext4 partition
+
+12. **Patch bootargs** — sets `net.ifnames=0 biosdevname=0` in each squashfs image's `/etc/cos/bootargs.cfg`
+
+13. **Sparse trim** — `fallocate --dig-holes` to punch out zero regions (80G virtual → ~8.8G actual)
+
+### Required configuration
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `kairos_kernel_version` | Kernel version in the image | `6.8.0-87-generic` |
+| `kairos_container_registry` | Container registry for CanvOS | `ttl.sh` |
+| `palette_endpoint` | Palette API endpoint | `api.spectrocloud.com` |
+| `palette_token` | Palette registration token | (base64 string) |
+| `palette_project_uid` | Palette project ID | `68e6a683b6b66c6045d1b584` |
+| `bcm_password` | BCM root password (for SSH key auth) | `Br1ghtClust3r` |
+
+### Artifacts produced
+
+| File | Description |
+|------|-------------|
+| `build/palette-edge-installer.iso` | Kairos installer ISO |
+| `build/kairos-disk.raw` | 80G sparse raw disk (actual ~8.8G) |
+| `build/cloud-config.yaml` | Rendered cloud-config |
+| `build/bcm-kairos-key` | ED25519 SSH keypair |
+
+### What can go wrong
+
+- **Docker not running** — CanvOS build requires Docker. Check `docker info`.
+- **Earthly build fails** — network issues downloading packages, Docker layer caching issues. Check `logs/04-kairos-build.log`.
+- **QEMU install hangs** — the 600-second serial timeout may not be enough. Check `logs/qemu-install.log` for kairos-agent output.
+- **GRUB-pc not installed** — if kairos-agent installs EFI GRUB instead of BIOS GRUB, the image won't boot on SeaBIOS VMs. Verify with `dd if=build/kairos-disk.raw bs=512 count=1 | xxd | head` — should start with GRUB boot code, not zeros.
+
+---
+
+## Stage 5: `make deploy-dd`
+
+**Playbook**: `playbooks/05-deploy-dd.yml`
+**Role**: `deploy_dd`
+**Hosts**: `localhost`
+
+### What it does
+
+Compresses the raw disk image with lz4, uploads it to the BCM head node, configures BCM's PXE provisioning with a custom installer image that runs `curl | lz4 -d | dd` to write Kairos directly to disk.
+
+The deploy script (`roles/deploy_dd/templates/deploy-dd.sh.j2`) runs as a rendered bash script with 7 steps.
+
+#### Step-by-step
+
+1. **Load deploy facts** — gets `bcm_connect_ip` from cached facts
+
+2. **Render templates**:
+   - `build/install-kairos.sh` — the dd installer that runs on the compute node
+   - `build/deploy-dd.sh` — the orchestration script that configures BCM
+
+3. **Run deploy-dd.sh** (async, up to 4 hours):
+
+   **[1/7] Compress and upload**
+   - `lz4 -f build/kairos-disk.raw build/kairos-disk.raw.lz4` (80G → ~5.6G)
+   - `scp` to BCM at `/cm/shared/kairos/disk.raw.lz4`
+
+   **[2/7] HTTP server**
+   - Creates systemd service `kairos-http.service` on BCM
+   - Runs `python3 -m http.server 8888` in `/cm/shared/kairos/`
+   - Compute nodes will `curl http://{bcm_ip}:8888/disk.raw.lz4`
+
+   **[3/7] Create installer image**
+   - Clones BCM's `default-image` software image → `kairos-installer` via `cmsh`
+   - If `kairos-installer` already exists, reuses it
+
+   **[4/7] Install dd service into image**
+   - Installs `lz4` on BCM host (fixes DNS to gateway if needed), copies binary into chroot
+   - Copies `install-kairos.sh` into `/cm/images/kairos-installer/usr/local/sbin/`
+   - Creates `kairos-install.service` (systemd oneshot, `ExecStartPre=sleep 10`, runs `install-kairos.sh`)
+   - Enables the service in the image
+   - Adds `auto eth0 / iface eth0 inet dhcp` and `auto ens3 / iface ens3 inet dhcp` to the image's network interfaces (required for networking after callinginit)
+
+   **[5/7] Create kairos category**
+   - Creates `kairos` category in BCM via `cmsh`
+   - Sets software image to `kairos-installer`
+   - Sets install mode to `FULL`
+   - Sets kernel parameters: `console=ttyS0,115200n8 net.ifnames=0 biosdevname=0`
+
+   **[6/7] Register compute node**
+   - Registers `node001` with MAC `kairos_vm_mac` and category `kairos`
+   - Sets IP to `{bcm_internal_ip subnet}.10` to avoid gateway conflict (BCM auto-assigns from base+1)
+
+   **[7/7] Regenerate ramdisk**
+   - `cmsh -c "softwareimage; use kairos-installer; createramdisk -w"` — rebuilds the PXE initrd
+
+### The install-kairos.sh script
+
+This is what runs on the compute node after BCM provisions it. Located at `roles/deploy_dd/templates/install-kairos.sh.j2`:
+
+```
+1. Detect target disk (first non-floppy block device)
+2. Wait for HTTP server to be reachable (curl HEAD, up to 60 retries)
+3. Stage binaries to RAM (/dev/shm/kinstall/):
+   - bash, curl, lz4, dd, sync, sleep, sgdisk
+   - All shared libraries (ldd + cp)
+4. Enable sysrq (echo 1 > /proc/sys/kernel/sysrq)
+5. Create run-dd.sh in RAM:
+   - curl | lz4 -d | dd of=/dev/vda bs=4M oflag=direct
+   - sgdisk -e (fix GPT backup header)
+   - drop_caches
+   - sync
+   - echo o > /proc/sysrq-trigger (poweroff)
+6. exec into staged bash running run-dd.sh from RAM
+```
+
+**Critical**: `oflag=direct` is required. It bypasses the page cache so the LVM thin pool only allocates blocks for non-zero data. Without it (`conv=sparse`), the page cache dirties all pages and the thin pool allocates for the full 80G, overflowing the pool.
+
+### Required configuration
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `bcm_connect_ip` | BCM SSH target (from facts) | `10.100.0.200` |
+| `bcm_password` | BCM root password | `Br1ghtClust3r` |
+| `bcm_internal_ip` | BCM internal IP (for node IP calculation) | (from facts) |
+| `bcm_external_gateway` | Gateway (for DNS fix on BCM) | (from facts) |
+| `kairos_vm_mac` | Compute node MAC address | `52:54:00:00:02:01` |
+
+### Artifacts produced
+
+| File | Description |
+|------|-------------|
+| `build/kairos-disk.raw.lz4` | Compressed raw image (~5.6 GB) |
+| `build/install-kairos.sh` | Rendered installer script |
+| `build/deploy-dd.sh` | Rendered deploy orchestration script |
+
+On BCM:
+- `/cm/shared/kairos/disk.raw.lz4` — the image served via HTTP
+- `/cm/images/kairos-installer/` — the PXE installer image with dd service
+- `kairos` category + `node001` registration in cmsh
+
+### What can go wrong
+
+- **lz4 not on BCM** — the script installs it, but needs DNS (sets resolv.conf to gateway). If BCM can't reach `archive.ubuntu.com`, lz4 install fails.
+- **Thin pool overflow** — `oflag=direct` writes ~37G actual to the thin pool. Ensure the pool has at least 40G free after BCM's ~30G.
+- **createramdisk timeout** — regenerating the PXE initrd can take 10+ minutes. The async task has a 4-hour timeout.
+- **Node IP conflict** — if the compute node gets `.1` (the gateway), PXE provisioning breaks. The script hardcodes `.10`.
+- **Stale installer image** — if re-running, the script detects `kairos-installer` exists and reuses it. If the image is corrupt (from a previous thin pool overflow), delete it manually: `cmsh -c "softwareimage; remove kairos-installer; commit"`
+
+---
+
+## After Stage 5: `make kairos-vm-create`
+
+Stage 6 creates the Kairos compute VM and PXE boots it. The full flow:
+
+1. Creates VM 201 with SeaBIOS, 80G virtio disk, boot order `virtio0;net0`
+2. Empty disk falls through to PXE → BCM provisions the installer image via rsync
+3. Node switches to local root (`callinginit`) — networking via eth0/ens3 DHCP
+4. `kairos-install.service` starts → `install-kairos.sh` runs dd from RAM
+5. VM powers off via sysrq
+6. Ansible detects stopped VM, starts it from disk
+7. GRUB boots Kairos → Palette agent registers
+
+---
+
+## Summary: Full clean deployment
+
+```bash
+make proxmox-down          # Tear down everything
+make proxmox-up            # Stand up Proxmox testbed + BCM VM shell
+make bcm-prepare           # Remaster BCM ISO
+make bcm-vm-create-api     # Install BCM, wait for poweroff, boot from disk
+make kairos-build          # Build Kairos ISO + raw disk image
+make deploy-dd             # Upload image, configure PXE on BCM
+make kairos-vm-create      # PXE boot Kairos, dd, reboot into Kairos
+make validate              # 18-point validation
+```
+
+Total time: 2-3 hours (dominated by BCM install ~90 min and Kairos build ~45 min).

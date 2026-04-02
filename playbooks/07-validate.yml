@@ -3,5 +3,8 @@
 - name: Validate Kairos deployment
   hosts: localhost
   gather_facts: true
+  pre_tasks:
+    - name: Load deployment facts
+      ansible.builtin.include_tasks: load-deploy-facts.yml
   roles:
     - validate

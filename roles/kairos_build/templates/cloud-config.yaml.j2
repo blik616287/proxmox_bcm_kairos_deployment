@@ -41,10 +41,12 @@ stages:
     - name: "BCM integration: set NOSYNC + start cmd"
       commands:
         - |
-          for i in $(seq 1 30); do
-            ping -c1 -W2 {{ bcm_internal_ip }} >/dev/null 2>&1 && break
-            sleep 2
-          done
+          for i in $(seq 1 60); do
+            ip -4 addr show eth0 2>/dev/null | grep -q "inet " && \
+              ping -c1 -W2 {{ bcm_internal_ip }} >/dev/null 2>&1 && break
+            sleep 5
+          done || true
+          ping -c1 -W2 {{ bcm_internal_ip }} >/dev/null 2>&1 || exit 0
           NODE_MAC=$(ip route get 1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}' | xargs -I{} ip link show {} 2>/dev/null | awk '/ether/{print $2}')
           export NODE_NAME=$(ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
               -o ConnectTimeout=10 -o LogLevel=ERROR -i /var/lib/bcm/bcm-key \
@@ -86,7 +88,7 @@ stages:
               -i /var/lib/bcm/bcm-key \
               root@{{ bcm_internal_ip }}:/cm/node-installer/certificates/${NODE_MAC}/key \
               /var/lib/cm/cmd-etc/cert.key 2>/dev/null || true
-          unshare --mount --fork /bin/bash -c "
+          nohup unshare --mount --fork /bin/bash -c "
             mount --bind /var/lib/cm/cmd-etc /var/lib/cm/rootfs/cm/local/apps/cmd/etc
             mount -t proc proc /var/lib/cm/rootfs/proc 2>/dev/null || true
             mount -t sysfs sysfs /var/lib/cm/rootfs/sys 2>/dev/null || true
@@ -101,5 +103,6 @@ stages:
               export HOSTNAME=$(cat /etc/hostname)
               /cm/local/apps/cmd/sbin/cmd -s -n
             '
-          " &
+          " </dev/null >/dev/null 2>&1 &
+          disown
 {% endif %}

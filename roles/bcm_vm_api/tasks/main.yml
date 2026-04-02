@@ -1,0 +1,424 @@
+---
+# BCM Head Node VM — API-based, ISO boot (no SSH to Proxmox, no root@pam required).
+#
+# Works in two modes:
+#   1. Create new VM: set bcm_vmid to an unused ID (or omit to auto-assign)
+#   2. Use existing VM: set bcm_vmid to an existing VM ID — attaches ISO,
+#      configures cloud-init, and installs BCM onto the existing disk.
+#
+# Cloud-init CIDATA drive provides static network config (v1 format).
+# The autoinstall script in the rootfs reads CIDATA, renders build-config.xml
+# from a Jinja2 template, then runs cm-master-install.
+#
+# NIC order: net0 = internal (provisioning), net1 = external (management).
+# With net.ifnames=0 biosdevname=0 in GRUB, these become eth0 and eth1.
+
+- name: Set API auth variables
+  tags: [always]
+  ansible.builtin.set_fact:
+    pve_api_url: "https://{{ proxmox_api_host }}:{{ proxmox_api_port | default(8006) }}"
+    pve_auth_header: "PVEAPIToken={{ proxmox_api_user }}!{{ proxmox_api_token_id }}={{ proxmox_api_token_secret }}"
+
+# ---- Upload remastered ISO via API ----
+
+- name: Upload remastered BCM ISO to Proxmox
+  tags: [create]
+  ansible.builtin.shell: |
+    API="{{ pve_api_url }}/api2/json/nodes/{{ proxmox_node }}/storage/local/upload"
+    AUTH="{{ pve_auth_header }}"
+    ISO_NAME="bcm-autoinstall.iso"
+    # Delete existing ISO if present (always upload fresh)
+    curl -sk -X DELETE -H "Authorization: $AUTH" \
+      "{{ pve_api_url }}/api2/json/nodes/{{ proxmox_node }}/storage/local/content/local:iso/${ISO_NAME}" 2>/dev/null || true
+    echo "Uploading $ISO_NAME (this may take several minutes)..."
+    RESULT=$(curl -sk -X POST -H "Authorization: $AUTH" \
+      -F "content=iso" \
+      -F "filename=@{{ build_dir }}/bcm-autoinstall.iso;filename=${ISO_NAME}" \
+      "$API")
+    echo "$RESULT"
+    # Extract imgcopy UPID and wait for it to complete
+    UPID=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['data'])" 2>/dev/null || true)
+    if [ -z "$UPID" ]; then
+      echo "FAILED: Could not extract imgcopy UPID"
+      exit 1
+    fi
+    # The UPID contains the node name — extract it
+    UPID_NODE=$(echo "$UPID" | cut -d: -f2)
+    echo "Waiting for imgcopy on $UPID_NODE..."
+    ELAPSED=0
+    while [ $ELAPSED -lt 600 ]; do
+      STATUS=$(curl -sk -H "Authorization: $AUTH" \
+        "{{ pve_api_url }}/api2/json/nodes/${UPID_NODE}/tasks/$(python3 -c "import urllib.parse; print(urllib.parse.quote('${UPID}', safe=''))")/status" 2>/dev/null | \
+        python3 -c "import sys,json; d=json.load(sys.stdin)['data']; print(d.get('status',''), d.get('exitstatus',''))" 2>/dev/null)
+      if echo "$STATUS" | grep -q "stopped"; then
+        echo "imgcopy complete: $STATUS"
+        echo "$STATUS" | grep -q "OK" && exit 0 || exit 1
+      fi
+      sleep 5
+      ELAPSED=$((ELAPSED + 5))
+    done
+    echo "TIMEOUT waiting for imgcopy"
+    exit 1
+  delegate_to: localhost
+  timeout: 1800
+
+# ---- Check if VM exists ----
+
+- name: Check if BCM VM exists
+  tags: [create, start, stop]
+  ansible.builtin.uri:
+    url: "{{ pve_api_url }}/api2/json/nodes/{{ proxmox_node }}/qemu/{{ bcm_vmid }}/status/current"
+    method: GET
+    headers:
+      Authorization: "{{ pve_auth_header }}"
+    validate_certs: false
+  register: bcm_vm_check
+  failed_when: false
+
+# ---- Create new VM if it doesn't exist ----
+
+- name: Create new BCM VM
+  tags: [create]
+  when: bcm_vm_check.status != 200
+  community.proxmox.proxmox_kvm:
+    api_host: "{{ proxmox_api_host }}"
+    api_port: "{{ proxmox_api_port | default(8006) }}"
+    api_user: "{{ proxmox_api_user }}"
+    api_token_id: "{{ proxmox_api_token_id }}"
+    api_token_secret: "{{ proxmox_api_token_secret }}"
+    validate_certs: false
+    node: "{{ proxmox_node }}"
+    vmid: "{{ bcm_vmid }}"
+    name: "{{ bcm_vm_name }}"
+    memory: "{{ bcm_vm_memory }}"
+    cores: "{{ bcm_vm_cores }}"
+    bios: seabios
+    ostype: l26
+    scsihw: virtio-scsi-single
+    net:
+      net0: "virtio={{ bcm_vm_mac_internal }},bridge={{ bcm_internal_bridge }}{% if bcm_vlan_tag is defined %},tag={{ bcm_vlan_tag }}{% endif %}"
+      net1: "e1000={{ bcm_vm_mac_external }},bridge={{ bcm_external_bridge | default('vmbr0') }}{% if bcm_vlan_tag is defined %},tag={{ bcm_vlan_tag }}{% endif %}"
+    scsi:
+      scsi0: "{{ proxmox_storage | default('local-lvm') }}:{{ bcm_vm_disk_size | regex_replace('G$', '') }},format=raw,iothread=1"
+    state: present
+
+# ---- Configure VM for install (works for both new and existing VMs) ----
+
+- name: Configure BCM VM for install (ISO boot, static IPs)
+  tags: [create]
+  when: bcm_static_network | default(false)
+  block:
+    - name: Detach existing IDE2 if present
+      ansible.builtin.shell: |
+        curl -sk -X PUT -H "Authorization: {{ pve_auth_header }}" \
+          "{{ pve_api_url }}/api2/json/nodes/{{ proxmox_node }}/qemu/{{ bcm_vmid }}/config" \
+          -d "delete=ide2"
+      delegate_to: localhost
+      changed_when: true
+
+    - name: Attach ISO, set boot order, VGA, and configure cloud-init via API
+      ansible.builtin.shell: |
+        curl -sk -X PUT -H "Authorization: {{ pve_auth_header }}" \
+          "{{ pve_api_url }}/api2/json/nodes/{{ proxmox_node }}/qemu/{{ bcm_vmid }}/config" \
+          --data-urlencode "ide2=local:iso/bcm-autoinstall.iso,media=cdrom" \
+          --data-urlencode "boot=order=ide2;scsi0" \
+          --data-urlencode "vga=std" \
+          --data-urlencode "ipconfig0=ip={{ bcm_internal_ip }}/{{ bcm_internal_netmask | default('24') }}" \
+          --data-urlencode "ipconfig1=ip={{ bcm_external_ip }}/{{ bcm_external_netmask | default('24') }},gw={{ bcm_external_gateway }}" \
+          --data-urlencode "nameserver={{ bcm_external_dns }}"
+      delegate_to: localhost
+
+- name: Configure BCM VM for install (ISO boot, DHCP)
+  tags: [create]
+  when: not (bcm_static_network | default(false))
+  community.proxmox.proxmox_kvm:
+    api_host: "{{ proxmox_api_host }}"
+    api_port: "{{ proxmox_api_port | default(8006) }}"
+    api_user: "{{ proxmox_api_user }}"
+    api_token_id: "{{ proxmox_api_token_id }}"
+    api_token_secret: "{{ proxmox_api_token_secret }}"
+    validate_certs: false
+    node: "{{ proxmox_node }}"
+    vmid: "{{ bcm_vmid }}"
+    ide:
+      ide2: "local:iso/bcm-autoinstall.iso,media=cdrom"
+    boot: "order=ide2;scsi0"
+    update: true
+    state: present
+
+- name: Validate required variables for static network
+  tags: [create]
+  when: bcm_static_network | default(false)
+  ansible.builtin.assert:
+    that:
+      - bcm_internal_ip is defined
+      - bcm_external_ip is defined
+      - bcm_external_gateway is defined
+      - bcm_external_dns is defined
+    fail_msg: >
+      Static networking requires: bcm_internal_ip, bcm_external_ip,
+      bcm_external_gateway, bcm_external_dns in inventory/group_vars/all.yml
+
+# ---- Install BCM ----
+
+- name: Install BCM head node
+  tags: [create]
+  block:
+    - name: Start BCM VM (boots from remastered ISO)
+      community.proxmox.proxmox_kvm:
+        api_host: "{{ proxmox_api_host }}"
+        api_port: "{{ proxmox_api_port | default(8006) }}"
+        api_user: "{{ proxmox_api_user }}"
+        api_token_id: "{{ proxmox_api_token_id }}"
+        api_token_secret: "{{ proxmox_api_token_secret }}"
+        validate_certs: false
+        node: "{{ proxmox_node }}"
+        vmid: "{{ bcm_vmid }}"
+        state: started
+
+    - name: Wait for install to begin before switching boot order
+      ansible.builtin.shell: |
+        ELAPSED=0
+        API_URL="{{ pve_api_url }}/api2/json/nodes/{{ proxmox_node }}/qemu/{{ bcm_vmid }}/status/current"
+        AUTH="{{ pve_auth_header }}"
+        echo "Waiting for disk writes to start..."
+        while [ $ELAPSED -lt 600 ]; do
+          WRITES=$(curl -sk -H "Authorization: $AUTH" "$API_URL" 2>/dev/null | \
+            python3 -c "import sys,json; print(json.load(sys.stdin)['data'].get('diskwrite',0))" 2>/dev/null || echo 0)
+          if [ "${WRITES:-0}" -gt 100000000 ]; then
+            echo "Install started: ${WRITES} bytes written at ${ELAPSED}s"
+            exit 0
+          fi
+          sleep 10
+          ELAPSED=$((ELAPSED + 10))
+        done
+        echo "WARNING: disk writes not detected after 600s, switching boot order anyway"
+      delegate_to: localhost
+      timeout: 660
+
+    - name: Wait for BCM install to complete (VM powers off when done, up to 4 hours)
+      ansible.builtin.shell: |
+        TIMEOUT=14400
+        ELAPSED=0
+        API_URL="{{ pve_api_url }}/api2/json/nodes/{{ proxmox_node }}/qemu/{{ bcm_vmid }}/status/current"
+        AUTH="{{ pve_auth_header }}"
+        echo "Waiting for VM to power off after install..."
+        while [ $ELAPSED -lt $TIMEOUT ]; do
+          RESULT=$(curl -sk -H "Authorization: $AUTH" "$API_URL" 2>/dev/null)
+          STATUS=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['data'].get('status',''))" 2>/dev/null)
+          WRITES=$(echo "$RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['data'].get('diskwrite',0))" 2>/dev/null || echo 0)
+          echo "Waiting... ${ELAPSED}s status=${STATUS} writes=${WRITES}"
+          if [ "$STATUS" = "stopped" ]; then
+            echo "INSTALL_DONE: VM powered off at ${ELAPSED}s (writes=${WRITES})"
+            exit 0
+          fi
+          sleep 30
+          ELAPSED=$((ELAPSED + 30))
+        done
+        echo "TIMEOUT after ${TIMEOUT}s"
+        exit 1
+      delegate_to: localhost
+      async: 14400
+      poll: 30
+
+# ---- Wait for VM to stop, then boot from disk ----
+
+- name: Wait for VM to power off after install
+  tags: [create]
+  ansible.builtin.shell: |
+    TIMEOUT=300
+    ELAPSED=0
+    API_URL="{{ pve_api_url }}/api2/json/nodes/{{ proxmox_node }}/qemu/{{ bcm_vmid }}/status/current"
+    AUTH="{{ pve_auth_header }}"
+    while [ $ELAPSED -lt $TIMEOUT ]; do
+      STATUS=$(curl -sk -H "Authorization: $AUTH" "$API_URL" 2>/dev/null | \
+        python3 -c "import sys,json; print(json.load(sys.stdin)['data'].get('status',''))" 2>/dev/null)
+      if [ "$STATUS" = "stopped" ]; then
+        echo "VM stopped at ${ELAPSED}s"
+        exit 0
+      fi
+      sleep 5
+      ELAPSED=$((ELAPSED + 5))
+    done
+    echo "TIMEOUT waiting for VM to stop"
+    exit 1
+  delegate_to: localhost
+
+- name: Switch boot order to disk-first
+  tags: [create]
+  community.proxmox.proxmox_kvm:
+    api_host: "{{ proxmox_api_host }}"
+    api_port: "{{ proxmox_api_port | default(8006) }}"
+    api_user: "{{ proxmox_api_user }}"
+    api_token_id: "{{ proxmox_api_token_id }}"
+    api_token_secret: "{{ proxmox_api_token_secret }}"
+    validate_certs: false
+    node: "{{ proxmox_node }}"
+    vmid: "{{ bcm_vmid }}"
+    boot: "order=scsi0;ide2"
+    update: true
+    state: present
+
+- name: Start BCM VM from disk
+  tags: [create]
+  community.proxmox.proxmox_kvm:
+    api_host: "{{ proxmox_api_host }}"
+    api_port: "{{ proxmox_api_port | default(8006) }}"
+    api_user: "{{ proxmox_api_user }}"
+    api_token_id: "{{ proxmox_api_token_id }}"
+    api_token_secret: "{{ proxmox_api_token_secret }}"
+    validate_certs: false
+    node: "{{ proxmox_node }}"
+    vmid: "{{ bcm_vmid }}"
+    state: started
+
+# Static network: we know the IP upfront
+- name: Wait for BCM SSH (static IP)
+  tags: [create, start]
+  when: bcm_static_network | default(false)
+  ansible.builtin.wait_for:
+    host: "{{ bcm_external_ip }}"
+    port: 22
+    delay: 30
+    timeout: 600
+  delegate_to: localhost
+
+# DHCP: discover the IP via QEMU guest agent or internal network scan
+- name: Discover BCM IP (DHCP)
+  tags: [create, start]
+  when: not (bcm_static_network | default(false))
+  ansible.builtin.shell: |
+    API_URL="{{ pve_api_url }}/api2/json/nodes/{{ proxmox_node }}/qemu/{{ bcm_vmid }}/agent/network-get-interfaces"
+    AUTH="{{ pve_auth_header }}"
+    TIMEOUT=300
+    ELAPSED=0
+    while [ $ELAPSED -lt $TIMEOUT ]; do
+      RESULT=$(curl -sk -H "Authorization: $AUTH" "$API_URL" 2>/dev/null)
+      IP=$(echo "$RESULT" | python3 -c "
+    import sys,json
+    try:
+      data = json.load(sys.stdin)['data']['result']
+      for iface in data:
+        if iface.get('name','') in ('eth1','ens19'):
+          for addr in iface.get('ip-addresses', []):
+            ip = addr.get('ip-address','')
+            if not ip.startswith('127.') and ':' not in ip:
+              print(ip); sys.exit(0)
+    except: pass" 2>/dev/null)
+      if [ -n "$IP" ]; then
+        echo "$IP"
+        exit 0
+      fi
+      sleep 10
+      ELAPSED=$((ELAPSED + 10))
+    done
+    echo "TIMEOUT"
+    exit 1
+  delegate_to: localhost
+  register: bcm_dhcp_ip
+  changed_when: false
+
+- name: Set BCM connect IP
+  tags: [create, start]
+  ansible.builtin.set_fact:
+    bcm_connect_ip: "{{ bcm_external_ip if (bcm_static_network | default(false)) else bcm_dhcp_ip.stdout | default(bcm_internal_ip) }}"
+
+- name: Cache BCM connect IP
+  tags: [create, start]
+  ansible.builtin.set_fact:
+    deploy_bcm_connect_ip: "{{ bcm_connect_ip }}"
+    cacheable: true
+
+- name: Clear stale SSH host keys
+  tags: [create, start]
+  ansible.builtin.shell: |
+    ssh-keygen -R "{{ bcm_connect_ip }}" 2>/dev/null || true
+    {% if bcm_static_network | default(false) %}
+    ssh-keygen -R "{{ bcm_internal_ip }}" 2>/dev/null || true
+    {% endif %}
+  delegate_to: localhost
+  changed_when: false
+
+- name: Verify BCM SSH
+  tags: [create, start]
+  ansible.builtin.shell: |
+    sshpass -p "{{ bcm_password }}" ssh \
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      -o LogLevel=ERROR -o ConnectTimeout=10 \
+      root@{{ bcm_connect_ip }} "hostname; ip -br addr"
+  delegate_to: localhost
+  register: bcm_ssh_check
+
+- name: Show BCM connectivity
+  tags: [create, start]
+  ansible.builtin.debug:
+    msg: "{{ bcm_ssh_check.stdout }}"
+
+- name: Wait for cmfirstboot to complete
+  tags: [create, start]
+  ansible.builtin.shell: |
+    TIMEOUT=1800
+    ELAPSED=0
+    while [ $ELAPSED -lt $TIMEOUT ]; do
+      STATUS=$(sshpass -p "{{ bcm_password }}" ssh \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o LogLevel=ERROR -o ConnectTimeout=5 \
+        root@{{ bcm_connect_ip }} \
+        "systemctl is-active cmfirstboot 2>/dev/null || echo inactive" 2>/dev/null | grep -oE 'active|activating|inactive' | tail -1)
+      if [ "$STATUS" != "active" ] && [ "$STATUS" != "activating" ]; then
+        echo "cmfirstboot done (status: ${STATUS:-inactive})"
+        exit 0
+      fi
+      sleep 15
+      ELAPSED=$((ELAPSED + 15))
+      echo "cmfirstboot: ${STATUS} (${ELAPSED}s)"
+    done
+    echo "TIMEOUT"
+    exit 1
+  delegate_to: localhost
+  timeout: 1800
+
+- name: Wait for CMDaemon to start
+  tags: [create, start]
+  ansible.builtin.shell: |
+    TIMEOUT=300
+    ELAPSED=0
+    while [ $ELAPSED -lt $TIMEOUT ]; do
+      STATUS=$(sshpass -p "{{ bcm_password }}" ssh \
+        -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o LogLevel=ERROR -o ConnectTimeout=5 \
+        root@{{ bcm_connect_ip }} \
+        "systemctl is-active cmdaemon 2>/dev/null" 2>/dev/null)
+      if [ "$STATUS" = "active" ]; then
+        echo "CMDaemon is running"
+        exit 0
+      fi
+      sleep 10
+      ELAPSED=$((ELAPSED + 10))
+      echo "cmdaemon: ${STATUS:-unknown} (${ELAPSED}s)"
+    done
+    echo "TIMEOUT waiting for cmdaemon"
+    exit 1
+  delegate_to: localhost
+  timeout: 360
+
+- name: Display BCM VM info
+  tags: [create, start]
+  ansible.builtin.debug:
+    msg: "BCM head node ready at {{ bcm_connect_ip }} (VMID {{ bcm_vmid }} on {{ proxmox_node }})"
+
+# ---- Stop ----
+
+- name: Stop BCM VM
+  tags: [stop, never]
+  community.proxmox.proxmox_kvm:
+    api_host: "{{ proxmox_api_host }}"
+    api_port: "{{ proxmox_api_port | default(8006) }}"
+    api_user: "{{ proxmox_api_user }}"
+    api_token_id: "{{ proxmox_api_token_id }}"
+    api_token_secret: "{{ proxmox_api_token_secret }}"
+    validate_certs: false
+    node: "{{ proxmox_node }}"
+    vmid: "{{ bcm_vmid }}"
+    state: stopped
+    force: true
