@@ -75,36 +75,36 @@ Stage 0 is automatically skipped because `proxmox_api_host` is reachable.
 
 ```yaml
 # Proxmox API — provided by the Proxmox admin
-proxmox_api_host: "172.16.10.101"
-proxmox_api_user: "lab103@pve"
+proxmox_api_host: "<proxmox-ip>"
+proxmox_api_user: "<your-api-user>"
 proxmox_api_password: "<your-proxmox-password>"
 proxmox_api_token_id: "ansible"
 proxmox_api_token_secret: "<your-api-token-secret>"
-proxmox_node: "swlk-prxmx04"
-proxmox_storage: "data-pure"
+proxmox_node: "<your-node-name>"
+proxmox_storage: "<your-storage>"
 
 # Network — matches the provided infrastructure
 bcm_internal_bridge: vmbr0
-bcm_internal_ip: "172.16.103.201"
+bcm_internal_ip: "<bcm-internal-ip>"
 bcm_internal_netmask: "24"
-bcm_internal_cidr: "172.16.103.0/24"
+bcm_internal_cidr: "<bcm-internal-cidr>"
 bcm_vlan_tag: 3103                        # optional, omit if no VLANs
 
 bcm_external_bridge: vmbr0
 bcm_external_vlan_tag: 3103               # optional
-bcm_external_ip: "172.16.103.202"
+bcm_external_ip: "<bcm-external-ip>"
 bcm_external_netmask: "24"
-bcm_external_gateway: "172.16.103.1"
-bcm_external_dns: "172.16.10.31"
-bcm_external_dns_search: "kosmoslabs.io"
+bcm_external_gateway: "<gateway-ip>"
+bcm_external_dns: "<dns-server-ip>"
+bcm_external_dns_search: "<your-domain>"
 
 bcm_static_network: true
-bcm_connect_ip: "172.16.103.201"          # IP reachable from the build host
+bcm_connect_ip: "<bcm-internal-ip>"          # IP reachable from the build host
 
 # VM — the pre-created VM
 bcm_vmid: 200
-bcm_vm_mac_internal: "BC:24:11:7F:33:7C"
-bcm_vm_mac_external: "BC:24:11:ED:21:50"
+bcm_vm_mac_internal: "<vm-mac-internal>"
+bcm_vm_mac_external: "<vm-mac-external>"
 ```
 
 #### Key differences from testbed
@@ -410,8 +410,8 @@ Deploys the BCM head node entirely via the Proxmox API — no SSH to the Proxmox
 | `bcm_vm_cores` | CPU cores | `4` |
 | `bcm_vm_memory` | RAM in MB | `8192` |
 | `bcm_vm_disk_size` | Disk size | `100G` |
-| `bcm_vm_mac_internal` | eth0 MAC | `BC:24:11:7F:33:7C` |
-| `bcm_vm_mac_external` | eth1 MAC | `BC:24:11:ED:21:50` |
+| `bcm_vm_mac_internal` | eth0 MAC | `<vm-mac-internal>` |
+| `bcm_vm_mac_external` | eth1 MAC | `<vm-mac-external>` |
 | `bcm_password` | BCM root password | `<your-bcm-password>` |
 | `bcm_static_network` | Static vs DHCP | `true` |
 | `bcm_internal_ip` | eth0 IP (set by deploy facts or group_vars) | e.g. `10.100.0.200` |

@@ -451,19 +451,18 @@ This script runs inside the NFS-booted `kairos-installer` environment on the com
 1. **Discovers target disk**: `lsblk -ndo NAME,TYPE | awk '$2=="disk"'` → `/dev/sda`
 2. **Waits for HTTP server**: Polls `http://10.100.0.200:8888/disk.raw.lz4` until reachable
 3. **Stages binaries to RAM** (`/dev/shm/kinstall/`):
-   - Copies `bash`, `curl`, `lz4 -d`, `dd`, `sync`, `reboot`, `sleep` and all their shared libraries
+   - Copies `bash`, `curl`, `lz4`, `dd`, `sync`, `sleep`, `sgdisk` and all their shared libraries
    - This is critical because `dd` is about to overwrite the disk that the OS is running from (NFS root → disk write → disk now has Kairos, old NFS filesystem is irrelevant)
 4. **Creates `run-dd.sh`** in RAM:
    ```bash
    curl --fail -s http://{bcm_ip}:8888/disk.raw.lz4 | lz4 -d - - | dd of=/dev/vda bs=4M oflag=direct
    sync
-   echo s > /proc/sysrq-trigger  # emergency sync
-   echo b > /proc/sysrq-trigger  # emergency reboot
+   echo o > /proc/sysrq-trigger  # emergency poweroff
    ```
 5. **Executes from RAM**: `exec /dev/shm/kinstall/bash /dev/shm/kinstall/run-dd.sh`
    - The `exec` replaces the current process, so the script itself is no longer needed
    - All binaries run from RAM, filesystem on disk is being overwritten
-   - Uses `sysrq-trigger` for reboot because normal `reboot` command would try to use the (now overwritten) disk
+   - Uses `sysrq-trigger` for poweroff because normal `poweroff` command would try to use the (now overwritten) disk
 
 ---
 
@@ -649,7 +648,7 @@ Direct kernel boot (`-kernel` + `-initrd`) bypasses the ISO bootloader entirely.
 The Kairos OS uses an immutable architecture with squashfs images inside partitions. Running `kairos-agent install` in QEMU pre-builds the entire disk image offline, then `dd` clones it block-for-block to the target. This is faster than running the installer on each node and ensures every node gets an identical image. The trade-off is the large image size (mitigated by sparse files and gzip compression).
 
 ### Why Stage Binaries to RAM Before `dd`?
-The `install-kairos.sh` script copies `curl`, `dd`, `lz4 -d`, and their shared libraries to `/dev/shm` (tmpfs/RAM) before running `dd`. This is because `dd` overwrites `/dev/sda` from block 0, destroying the partition table, bootloader, and filesystem that the currently-running NFS-booted OS depends on. After `dd` starts, the disk is no longer readable — all execution must happen from RAM. The `sysrq-trigger` reboot is used because the normal `reboot` binary on disk would be overwritten.
+The `install-kairos.sh` script copies `curl`, `dd`, `lz4`, `sgdisk`, and their shared libraries to `/dev/shm` (tmpfs/RAM) before running `dd`. This is because `dd` overwrites `/dev/vda` from block 0, destroying the partition table, bootloader, and filesystem. After `dd` starts, the disk is no longer readable — all execution must happen from RAM. The `sysrq-trigger` poweroff (`echo o`) is used because the normal `poweroff` binary on disk would be overwritten.
 
 ### Why HTTP Server Instead of NFS for Image Delivery?
 The compressed disk image is served via a Python HTTP server on port 8888. While it could be read directly from the NFS-mounted `/cm/shared/kairos/`, HTTP streaming (`curl | lz4 -d | dd`) is more robust for large transfers — it handles retries, doesn't require mount management, and works cleanly from the RAM-staged environment. The trade-off is an additional systemd service on BCM.
