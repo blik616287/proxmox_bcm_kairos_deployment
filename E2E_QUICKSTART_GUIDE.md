@@ -187,13 +187,13 @@ Downloads the BCM ISO from JFrog, extracts the kernel and rootfs, patches the ro
 | `bcm_password` | BCM root password (used by cm-master-install) | `Br1ghtClust3r` |
 | `bcm_hostname` | BCM hostname | `bcm11-headnode` |
 | `bcm_timezone` | Timezone | `America/Los_Angeles` |
-| `bcm_internal_ip` | BCM eth0 IP (provisioning network) | `172.16.103.201` |
-| `bcm_external_ip` | BCM eth1 IP (management network) | `172.16.103.202` |
-| `bcm_external_gateway` | Default gateway | `172.16.103.1` |
-| `bcm_external_dns` | DNS server | `172.16.10.31` |
+| `bcm_internal_ip` | BCM eth0 IP (provisioning network) | Set by deploy facts or group_vars |
+| `bcm_external_ip` | BCM eth1 IP (management network) | Set by deploy facts or group_vars |
+| `bcm_external_gateway` | Default gateway | Set by deploy facts or group_vars |
+| `bcm_external_dns` | DNS server | Set by deploy facts or group_vars |
 | `bcm_static_network` | Use static IPs (true) or DHCP (false) | `true` |
 
-When deploy facts exist (from Stage 0), `bcm_internal_ip`, `bcm_external_ip`, etc. are overridden with testbed values (e.g., `10.100.0.200`, `10.100.0.201`).
+These network variables are set dynamically by Stage 0's deploy facts (e.g., `10.100.0.200`, `10.100.0.201`, gateway `10.100.0.1`). For an external Proxmox deployment, set them in `group_vars/all` to match your network.
 
 ### Artifacts produced
 
@@ -283,10 +283,10 @@ Deploys the BCM head node entirely via the Proxmox API — no SSH to the Proxmox
 | `bcm_vm_mac_external` | eth1 MAC | `BC:24:11:ED:21:50` |
 | `bcm_password` | BCM root password | `Br1ghtClust3r` |
 | `bcm_static_network` | Static vs DHCP | `true` |
-| `bcm_internal_ip` | eth0 IP | (from facts or group_vars) |
-| `bcm_external_ip` | eth1 IP | (from facts or group_vars) |
-| `bcm_external_gateway` | Gateway | (from facts or group_vars) |
-| `bcm_external_dns` | DNS | (from facts or group_vars) |
+| `bcm_internal_ip` | eth0 IP (set by deploy facts or group_vars) | e.g. `10.100.0.200` |
+| `bcm_external_ip` | eth1 IP (set by deploy facts or group_vars) | e.g. `10.100.0.201` |
+| `bcm_external_gateway` | Gateway (set by deploy facts or group_vars) | e.g. `10.100.0.1` |
+| `bcm_external_dns` | DNS (set by deploy facts or group_vars) | e.g. `10.100.0.1` |
 
 ### What can go wrong
 
