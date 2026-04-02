@@ -7,9 +7,9 @@ Automated end-to-end pipeline that stands up a Proxmox VE environment, deploys a
 | Stage | Make Target | Description |
 |-------|-------------|-------------|
 | 0 | `make proxmox-up` | Stand up Proxmox VE testbed (skipped if API already reachable) |
-| 1 | `make create-vmbr1` | Create internal bridge (`vmbr1`) in Proxmox for BCM↔Kairos traffic |
+| 1 | `make create-vmbr1` | Create internal bridge (`vmbr1`) — optional, only for dual-bridge setups |
 | 2 | `make bcm-prepare` | Download BCM ISO from JFrog, patch rootfs for unattended install, remaster ISO |
-| 3 | `make bcm-vm-create` | Create BCM head node VM, run installer, switch to disk boot, discover IP |
+| 3 | `make bcm-vm-create-api` | Create BCM head node VM via Proxmox API, install, power off, boot from disk |
 | 4 | `make kairos-build` | Build Kairos ISO via CanvOS + generate raw disk image in local QEMU |
 | 5 | `make deploy-dd` | Upload lz4-compressed raw image to BCM, configure installer + PXE |
 | 6 | `make kairos-vm-create` | Create Kairos compute VM in Proxmox (PXE boot from BCM) |
@@ -37,9 +37,9 @@ This runs the `install-dependencies.yml` playbook which handles Debian/Ubuntu an
 |----------|----------|
 | Ansible + SSH | `ansible`, `sshpass` |
 | General tools | `curl`, `jq`, `git`, `lz4`, `socat` |
-| Docker | `docker.io` (Debian) / `docker` (Fedora) |
+| Docker | `docker.io` (skipped if Docker CE already installed) |
 | QEMU / KVM | `qemu-system-x86`, `qemu-utils` |
-| ISO remastering | `xorriso`, `cpio`, `gzip`, `p7zip-full` |
+| ISO remastering | `xorriso`, `cpio`, `gzip`, `7zip` |
 | FAT32 image tools | `mtools`, `dosfstools` |
 | Disk image tools | `e2fsprogs`, `util-linux` |
 | Netcat | `netcat-openbsd` (Debian) / `nmap-ncat` (Fedora) |
@@ -59,25 +59,30 @@ Every tool and collection should show `[OK]`. Fix any `[MISSING]` items before p
 ### 4. Configure your environment
 
 ```bash
-vi inventory/group_vars/all.yml
+vi inventory/group_vars/all
 ```
 
 At a minimum you need to set:
 - **Proxmox** — `proxmox_api_host`, `proxmox_api_user`, `proxmox_api_password`
-- **JFrog** — `jfrog_token` (for BCM ISO download)
+- **JFrog** — `jfrog_token`, `jfrog_instance`, `jfrog_repo`, `iso_filename`
 - **Palette** — `palette_endpoint`, `palette_token`, `palette_project_uid`
+- **BCM** — `bcm_password`, `bcm_hostname`, `bcm_internal_ip`, `bcm_external_ip`
 
 If `proxmox_api_host` points to an existing Proxmox server, Stage 0 is automatically skipped. Otherwise the pipeline will stand up a local Proxmox testbed VM via libvirt.
 
-### 5. Run the full pipeline
+### 5. Run the pipeline
 
 ```bash
-make orchestrate
+make proxmox-up           # Stage 0: Proxmox testbed + dual-NIC VM
+make bcm-prepare           # Stage 2: Remaster BCM ISO
+make bcm-vm-create-api     # Stage 3: Install BCM (API-only, no SSH to Proxmox)
+make kairos-build          # Stage 4: Build Kairos image
+make deploy-dd             # Stage 5: Deploy to BCM
+make kairos-vm-create      # Stage 6: PXE boot Kairos VM
+make validate              # Stage 7: Validate
 ```
 
-This executes all 8 stages in order (Proxmox → vmbr1 → BCM ISO → BCM VM → Kairos build → deploy → Kairos VM → validate). The full run can take 1-2 hours depending on download speeds and hardware.
-
-To run a single stage instead:
+To run a single stage:
 ```bash
 make bcm-prepare        # just Stage 2
 make kairos-build       # just Stage 4
@@ -101,60 +106,44 @@ make clean         # Remove local build/dist/logs directories
 make clean-all     # Both of the above
 ```
 
-## Local Testing with QEMU (via VXLAN Tunnel)
+## Deployment Modes
 
-For development and debugging, you can launch a local QEMU VM on the build host that PXE boots from the BCM head node over a VXLAN tunnel. This gives direct serial console access without Proxmox VM management overhead.
+### API-only (recommended)
 
-### Setup
-
-```bash
-# Stages 0-5 must be complete (BCM head node running, deploy-dd done)
-make kairos-local
-```
-
-This:
-1. Creates a VXLAN tunnel between the build host and Proxmox's vmbr1
-2. Launches a local QEMU VM with PXE boot over the tunnel
-3. BCM provisions the node (FULL install → dd → reboot → Kairos)
-4. Waits for Kairos to boot (up to 60 minutes)
-5. Validates via SSH through BCM
-
-### Serial console
+Uses the Proxmox API for all VM operations — no SSH access to the Proxmox host required:
 
 ```bash
-make kairos-local-serial   # tail -f the serial log
+make bcm-vm-create-api     # Stage 3 via API
 ```
 
-Serial output is logged to `logs/kairos-local-serial.log`. The log captures kernel boot messages but not interactive login (the VM runs headless with `-vga none`).
+Stage 0 creates an API token (`root@pam!ansible`) and caches the credentials as persistent Ansible facts in `facts/`. All downstream stages load these facts automatically.
 
-### Managing the local VM
+### SSH-based (legacy)
+
+Uses SSH + `qm` commands on the Proxmox host:
 
 ```bash
-make kairos-local-kill     # Kill the local QEMU VM by PID
+make bcm-vm-create         # Stage 3 via SSH
 ```
 
-The QEMU monitor socket is at `/tmp/qemu-kairos-monitor.sock`:
-```bash
-echo "info status" | sudo socat - UNIX-CONNECT:/tmp/qemu-kairos-monitor.sock
-echo "info blockstats" | sudo socat - UNIX-CONNECT:/tmp/qemu-kairos-monitor.sock  # disk write progress
+### Single-bridge topology
+
+When both BCM NICs are on the same bridge (e.g., `vmbr0` with VLAN tags), Stage 1 (`create-vmbr1`) is not needed. Set in `group_vars/all`:
+
+```yaml
+bcm_internal_bridge: vmbr0
+bcm_external_bridge: vmbr0
 ```
 
-### VXLAN tunnel details
+## Persistent Facts
 
-The tunnel bridges the build host into Proxmox's internal network (vmbr1, 10.141.0.0/16) so the local QEMU VM can PXE boot from BCM:
+Stage 0 caches deployment configuration as Ansible facts in `facts/` (jsonfile cache). All downstream playbooks load these via `playbooks/load-deploy-facts.yml`. This includes:
 
-```
-Build Host                          Proxmox VE
-├── br-bcm (bridge)                 ├── vmbr1 (10.141.0.0/16)
-│   ├── vxlan100 ──── VXLAN ────────│── vxlan100
-│   └── tap-kairos (QEMU)          │   ├── BCM eth0 (10.141.255.254)
-│                                   │   └── Kairos VMs
-└── virbr-pve (10.100.0.0/24) ─────└── enp1s0 → vmbr0
-```
+- Proxmox API credentials and token
+- BCM network configuration (IPs, bridges, gateways)
+- BCM connect IP for SSH access
 
-**MTU**: Transport interfaces (virbr-pve, enp1s0, vmbr0) are set to 9000 (jumbo frames) to accommodate VXLAN overhead. Inner interfaces (vxlan100, br-bcm, tap-kairos) use standard 1500 MTU.
-
-> **Important**: Never use `killall qemu-system-x86_64` — it will kill the Proxmox VM. Always kill local QEMU by specific PID.
+Facts are cached with `cacheable: true` and persist across playbook runs. To reset, delete `facts/` and re-run Stage 0.
 
 ## Kairos Deployment Flow (Stage 5-6 Detail)
 
@@ -174,54 +163,60 @@ The Kairos deployment uses BCM's PXE provisioning with a dd-based disk image ins
    ├── Stages curl, lz4, dd, sync, sleep to /dev/shm (RAM)
    ├── Enables sysrq
    ├── Downloads lz4-compressed raw image from BCM HTTP server
-   ├── Pipes: curl | lz4 -d | dd of=/dev/vda bs=16M conv=fsync,sparse
-   └── sysrq reboot (from RAM — disk is being overwritten)
+   ├── Pipes: curl | lz4 -d | dd of=/dev/vda bs=4M oflag=direct
+   └── sysrq poweroff (from RAM — disk is being overwritten)
 
-5. Node reboots → GRUB on disk boots Kairos
-   └── cloud-config runs: hostname from BCM, SSH keys, Palette registration,
-       NFS mount for BCM cmd integration
+5. Ansible detects VM stopped, switches boot order to disk-first, starts VM
+   └── GRUB on disk boots Kairos
+   └── cloud-config runs: hostname, SSH keys, Palette registration
 ```
 
 ### Image compression
 
-Raw disk images are compressed with **lz4** (not gzip) for ~10x faster decompression. The 80 GB sparse image compresses to ~5.6 GB. With `conv=sparse`, dd skips zero blocks — only ~8.8 GB of actual data is written.
+Raw disk images are compressed with **lz4** for ~10x faster decompression. The 80 GB sparse image compresses to ~5.6 GB.
 
-### Reboot mechanism
+### Poweroff mechanism
 
-After dd completes, the install script triggers a reboot via `sysrq-trigger` from staged bash in `/dev/shm` (RAM). The sysrq must be enabled (`echo 1 > /proc/sys/kernel/sysrq`) before exec'ing to the staged bash, since the disk is being overwritten during dd.
+After dd completes, the install script triggers a poweroff via `sysrq-trigger` (`echo o > /proc/sysrq-trigger`) from staged bash in `/dev/shm` (RAM). The sysrq must be enabled (`echo 1 > /proc/sys/kernel/sysrq`) before exec'ing to the staged bash, since the disk is being overwritten during dd. Ansible then detects the VM has stopped, switches the boot order to disk-first, and starts the VM.
 
-## Prerequisites
+### BCM install
 
-### Tools
-- `ansible`, `ansible-playbook`
-- `sshpass`, `curl`, `jq`
-- `docker`
-- `qemu-system-x86_64`, `qemu-img`
-- `xorriso`, `cpio`, `gzip`, `lz4`
-- `mcopy`, `mkfs.vfat` (mtools / dosfstools)
-- `socat` (for local QEMU testing)
-- `bridge-utils` (for VXLAN tunnel)
+The BCM autoinstall script runs `cm-master-install` without `--autoreboot` and calls `poweroff` when complete. Ansible detects the VM has stopped, switches boot order to `scsi0` (disk), and starts the VM from disk.
 
-### Ansible Collections
-- `community.proxmox`
-- `community.general`
-- `ansible.posix`
+## Thin Pool Sizing
 
-Install all at once: `make install-collections`
+The Proxmox testbed uses LVM thin provisioning. The `proxmox_vm_disk_size` must be large enough to back:
+- BCM VM disk (default 500G virtual, ~30G actual)
+- Kairos VM disk (80G virtual, ~37G actual after dd with `oflag=direct`)
+- Proxmox OS + overhead (~50G)
+
+**Minimum recommended**: 700G (`proxmox_vm_disk_size: "700G"`). The qcow2 is thin on the host so only actual written data consumes host disk space.
+
+## Local Testing with QEMU (via VXLAN Tunnel)
+
+For development and debugging, you can launch a local QEMU VM on the build host that PXE boots from the BCM head node over a VXLAN tunnel.
+
+```bash
+make kairos-local          # Launch QEMU VM via VXLAN
+make kairos-local-serial   # Tail serial log
+make kairos-local-kill     # Kill local QEMU by PID
+```
+
+> **Important**: Never use `killall qemu-system-x86_64` — it will kill the Proxmox VM. Always kill local QEMU by specific PID.
 
 ## Configuration
 
-All configuration is in `inventory/group_vars/all.yml`. Key sections:
+All configuration is in `inventory/group_vars/all` (no `.yml` extension). Key sections:
 
 | Section | Variables |
 |---------|-----------|
-| Proxmox API | `proxmox_api_host`, `proxmox_api_user`, `proxmox_api_password` |
-| Internal Network | `bcm_internal_bridge` (vmbr1), `bcm_internal_cidr` (10.141.0.0/16) |
+| Proxmox API | `proxmox_api_host`, `proxmox_api_user`, `proxmox_api_password`, `proxmox_api_token_id`, `proxmox_api_token_secret` |
+| BCM Network | `bcm_internal_bridge`, `bcm_internal_ip`, `bcm_external_bridge`, `bcm_external_ip`, `bcm_external_gateway` |
 | BCM Head Node | `bcm_vmid`, `bcm_vm_cores`, `bcm_vm_memory`, `bcm_password` |
-| Kairos Compute | `kairos_vmid`, `kairos_vm_cores`, `kairos_vm_memory` |
+| Kairos Compute | `kairos_vmid`, `kairos_vm_cores`, `kairos_vm_memory`, `kairos_vm_disk_size` |
 | JFrog (BCM ISO) | `jfrog_token`, `jfrog_instance`, `jfrog_repo`, `iso_filename` |
 | Palette | `palette_endpoint`, `palette_token`, `palette_project_uid` |
-| Paths | `build_dir`, `dist_dir` |
+| Testbed | `proxmox_vm_disk_size`, `proxmox_vm_ip`, `libvirt_net_gateway` |
 
 ### External Proxmox Server
 
@@ -230,77 +225,38 @@ To deploy on an existing Proxmox server (skipping Stage 0), set `proxmox_api_hos
 - Storage with `images` content type enabled (for VM disks)
 - An API token with VM and storage permissions
 
+## Networking
+
+### Dual-bridge (default for testbed)
+
+```
+Proxmox VE
+  vmbr0 (both internal + external)
+    ├── BCM head node eth0 (internal, provisioning)
+    ├── BCM head node eth1 (external, management)
+    └── Kairos compute (PXE boot from BCM)
+```
+
+### Dual-bridge with VLANs (production)
+
+```
+Proxmox VE
+  vmbr0 + VLAN tags
+    ├── BCM eth0 (VLAN 3101, internal)
+    ├── BCM eth1 (VLAN 3103, external)
+    └── Kairos compute (VLAN 3101, PXE)
+```
+
+BCM uses `net.ifnames=0 biosdevname=0` for classic NIC naming (`eth0`, `eth1`).
+
 ## Passing Extra Ansible Arguments
 
 Forward flags to `ansible-playbook` via `ANSIBLE_ARGS`:
 
 ```bash
 make orchestrate ANSIBLE_ARGS="-v"                           # verbose
-make bcm-vm-create ANSIBLE_ARGS="--tags create"              # run specific tags
+make bcm-vm-create-api ANSIBLE_ARGS="--tags create"          # run specific tags
 make proxmox-up ANSIBLE_ARGS="-e proxmox_api_host=10.0.0.5"  # override a variable
-```
-
-## Networking
-
-```
-┌─────────────────────────────────────────────┐
-│                  Proxmox VE                 │
-│                                             │
-│  vmbr0 (external, DHCP)                     │
-│    ├── BCM head node (eth1)                 │
-│    └── Proxmox management                   │
-│                                             │
-│  vmbr1 (internal, 10.141.0.0/16)            │
-│    ├── BCM head node (eth0, 10.141.255.254) │
-│    └── Kairos compute (PXE boot)            │
-└─────────────────────────────────────────────┘
-```
-
-- BCM head node has two NICs: `eth0` (internal/vmbr1) and `eth1` (external/vmbr0)
-- Kernel parameter `net.ifnames=0 biosdevname=0` forces classic naming (`eth0`, `eth1`)
-- Kairos compute nodes PXE boot from BCM over the internal bridge
-- Set `bcm_provisioning_nic` to a physical NIC name to bridge vmbr1 to hardware for bare-metal PXE
-
-## Project Structure
-
-```
-├── Makefile                          # Build/run targets
-├── ansible.cfg                       # Ansible configuration
-├── inventory/
-│   ├── hosts.yml                     # Inventory (localhost + proxmox)
-│   └── group_vars/all.yml            # All configuration variables
-├── playbooks/
-│   ├── site.yml                      # Full pipeline (imports all stages)
-│   ├── install-dependencies.yml      # Install all build prerequisites
-│   ├── 00-proxmox-up.yml             # Stage 0
-│   ├── 01-create-internal-network.yml# Stage 1
-│   ├── 02-bcm-prepare.yml            # Stage 2
-│   ├── 03-bcm-vm.yml                 # Stage 3
-│   ├── 04-kairos-build.yml           # Stage 4
-│   ├── 05-deploy-dd.yml              # Stage 5
-│   ├── 06-kairos-vm.yml              # Stage 6
-│   ├── 07-validate.yml               # Stage 7
-│   ├── kairos-local.yml              # Local QEMU testing via VXLAN
-│   └── teardown.yml                  # Destroy everything
-├── roles/
-│   ├── dependencies/                 # Install system packages + collections
-│   ├── bcm_prepare/                  # ISO download, rootfs patch, remaster
-│   ├── bcm_vm/                       # BCM VM create, install, IP discovery
-│   ├── kairos_build/                 # CanvOS build, QEMU disk image
-│   ├── deploy_dd/                    # Upload + dd deploy to BCM
-│   ├── kairos_vm/                    # Kairos compute VM (PXE)
-│   ├── vxlan_tunnel/                 # VXLAN tunnel for local QEMU testing
-│   ├── proxmox_internal_network/     # vmbr1 bridge setup
-│   └── validate/                     # Post-deploy validation
-├── proxmox/                          # Git submodule (proxmox-testbed)
-├── files/
-│   ├── canvos/overlay/               # Custom files baked into Kairos image
-│   └── installer-overlay/            # Kairos installer scripts
-├── templates/                        # Jinja2 templates
-├── CanvOS/                           # Git submodule (spectrocloud/CanvOS)
-├── build/                            # Intermediate artifacts (gitignored)
-├── dist/                             # Downloaded ISOs (gitignored)
-└── logs/                             # Playbook run logs (gitignored)
 ```
 
 ## Make Targets
@@ -309,9 +265,10 @@ make proxmox-up ANSIBLE_ARGS="-e proxmox_api_host=10.0.0.5"  # override a variab
 # Pipeline stages
 make orchestrate          # Full end-to-end pipeline
 make proxmox-up           # Stage 0: Proxmox testbed
-make create-vmbr1         # Stage 1: Internal bridge
+make create-vmbr1         # Stage 1: Internal bridge (optional)
 make bcm-prepare          # Stage 2: BCM ISO
-make bcm-vm-create        # Stage 3: BCM VM
+make bcm-vm-create-api    # Stage 3: BCM VM (API)
+make bcm-vm-create        # Stage 3: BCM VM (SSH, legacy)
 make kairos-build         # Stage 4: Kairos image
 make deploy-dd            # Stage 5: Deploy to BCM
 make kairos-vm-create     # Stage 6: Kairos VM (Proxmox)
@@ -329,23 +286,6 @@ make teardown             # Destroy VMs
 make clean                # Remove build artifacts
 make clean-all            # Teardown + clean
 ```
-
-## Build Artifacts
-
-All generated in `build/` (gitignored):
-
-| File | Produced By | Used By |
-|------|-------------|---------|
-| `bcm-autoinstall.iso` | Stage 2 | Stage 3 |
-| `.bcm-kernel`, `.bcm-rootfs-auto.cgz` | Stage 2 | Stage 3 |
-| `.bcm-init.img` | Stage 2 | Stage 3 |
-| `.bcm-ip` | Stage 3 | Stages 5, 6, 7 |
-| `palette-edge-installer.iso` | Stage 4 | Stage 4 (QEMU install) |
-| `kairos-disk.raw` | Stage 4 | Stage 5 |
-| `kairos-disk.raw.lz4` | Stage 5 | Stage 5 (upload to BCM) |
-| `cloud-config.yaml` | Stage 4 | Stage 4 (QEMU install) |
-| `bcm-kairos-key` | Stage 4 | Kairos boot (BCM integration) |
-| `compute-node-disk.qcow2` | `kairos-local` | Local QEMU testing |
 
 ## Logs
 
