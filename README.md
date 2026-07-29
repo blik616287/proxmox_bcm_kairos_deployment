@@ -287,3 +287,7 @@ make clean-all            # Teardown + clean
 ## Logs
 
 Each `make` target logs output to `logs/<playbook-name>.log`. The full pipeline log is at `logs/site.log`. Serial console logs for local QEMU testing are at `logs/kairos-local-serial.log`.
+
+## License
+
+[MIT](LICENSE) © 2026 Martin Forde <mforde84@gmail.com>, [Blik Labs](https://bliklabs.com).
